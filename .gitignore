@@ -8,6 +8,7 @@ input/*
 output/*
 !output/.gitkeep
 models/
+bin/
 logs/
 *.cbz
 review/overrides.json

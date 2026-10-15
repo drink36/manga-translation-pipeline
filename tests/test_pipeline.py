@@ -267,6 +267,18 @@ def test_demo_full_export_and_cached_rerun_need_no_model_requests(tmp_path):
     assert _artifact_snapshot(output, stages) == before
 
 
+def test_concurrent_pages_match_sequential_run(tmp_path):
+    exports = []
+    for slots in (1, 4):
+        config_path = create_demo(tmp_path / f"demo-{slots}")
+        cfg = load_config(config_path)
+        cfg["server"] = {"max_num_seqs": slots}
+        Pipeline(cfg).run()
+        chapter = json.loads((Path(cfg["output"]) / "export" / "chapter.json").read_text())
+        exports.append([(r["region_id"], r["original_text"], r["translation"]["text"]) for page in chapter["pages"] for r in page["regions"]])
+    assert exports[0] == exports[1] and exports[0]
+
+
 def test_demo_translation_override_reuses_ocr_reconcile_and_context(tmp_path):
     config_path = create_demo(tmp_path / "demo")
     cfg = load_config(config_path)

@@ -2,13 +2,16 @@
 
 No model is downloaded or loaded by this module. Qwen and an optional MangaLMM
 server can use separate instances/configuration. Configuration keys: endpoint,
-model, api_key_env, timeout_seconds, max_tokens, temperature, image_max_pixels,
-request_retries, enable_thinking, and response_format_json (default true).
+model, api_key_env, timeout_seconds, max_tokens, temperature, top_p, top_k, min_p,
+presence_penalty, repetition_penalty, image_max_pixels,
+request_retries, enable_thinking, and response_format_json (default true: each
+request carries its task's JSON schema for constrained decoding).
 """
 
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import math
@@ -19,7 +22,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from .prompts import system_prompt
+from .prompts import TASK_SCHEMAS, system_prompt
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -85,6 +88,26 @@ def _source_ids(payload: dict[str, Any]) -> list[str]:
 def _check_ids(actual: list[str], expected: list[str], label: str) -> None:
     if len(set(actual)) != len(actual) or set(actual) != set(expected):
         raise VLMResponseError(f"{label} must contain every input region ID exactly once")
+
+
+def _request_schema(task: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Task schema narrowed to this request's region IDs, so replies cannot drop or invent them."""
+    schema = copy.deepcopy(TASK_SCHEMAS[task])
+    if task not in {"reading_order", "translate", "verify", "visual_qa"}:
+        return schema
+    ids = _source_ids(payload)
+    if not ids:
+        return schema
+    properties = schema["properties"]
+    if task == "reading_order":
+        properties["region_ids"].update({"items": {"enum": ids}, "minItems": len(ids), "maxItems": len(ids)})
+    elif task == "visual_qa":
+        properties["issues"]["items"]["properties"]["region_id"] = {"enum": [*ids, "page"]}
+    else:
+        array = properties["translations" if task == "translate" else "checks"]
+        array["items"]["properties"]["region_id"] = {"enum": ids}
+        array.update({"minItems": len(ids), "maxItems": len(ids)})
+    return schema
 
 
 def _text_result(result: dict[str, Any], label: str) -> None:
@@ -267,8 +290,14 @@ class VLMClient:
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": bool(self.cfg.get("enable_thinking", False))},
         }
+        for key in ("top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty"):
+            if key in self.cfg:
+                body[key] = self.cfg[key]
+        if "repetition_penalty" in self.cfg:
+            # llama.cpp's name for it; unset, llama-server applies its own 1.1 default.
+            body["repeat_penalty"] = self.cfg["repetition_penalty"]
         if self.cfg.get("response_format_json", True):
-            body["response_format"] = {"type": "json_object"}
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": task, "schema": _request_schema(task, payload), "strict": True}}
         headers = {"Content-Type": "application/json"}
         key_env = self.cfg.get("api_key_env")
         if key_env:

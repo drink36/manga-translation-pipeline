@@ -2,12 +2,15 @@
 
 Japanese/English manga → Traditional Chinese, with independent OCR readings,
 coverage checks, chapter context, bounded verification loops, and editable JSON.
-Designed around one **NVIDIA A100 40 GB on OSC Ascend**.
+Configured for one **NVIDIA RTX 5070 (12 GB)** running `Qwen3.5-9B`: through llama.cpp
+on Windows ([Run on Windows](#run-on-windows-rtx-5070)), or through vLLM on Linux/WSL.
+The original target was an A100 40 GB on OSC Ascend with `Qwen3.8-27B`; the Slurm
+launcher for that setup is kept in `scripts/ascend.sh`.
 
 This folder contains executable orchestration and model adapters, not downloaded
 weights. The CPU demo and automated tests run without model inference. Actual OCR,
 translation quality, GPU compatibility, memory peaks, and speed have not been
-validated on your manga or on an A100.
+validated on your manga or on an RTX 5070.
 
 ## What is included
 
@@ -41,7 +44,7 @@ bridge. Neither is required or automatically downloaded. See [models](docs/model
 ## Try the CPU demo now
 
 The `.venv` already created in this folder contains only the lightweight runtime
-and test dependencies. From this folder:
+and test dependencies. From this folder (on Windows, use `.venv\Scripts\python`):
 
 ```bash
 .venv/bin/python -m manga_pipeline demo --output output/demo
@@ -84,8 +87,77 @@ uv pip install -p .venv -e '.[test]'
 
 These three inspection commands do not load/download models or contact a server.
 
+## Run on Windows (RTX 5070)
+
+vLLM is Linux-only, and its 9.1 GB checkpoint does not fit beside a Windows desktop
+on a 12 GB card. `configs/windows.yaml` therefore serves Qwen3.5-9B as a 4-bit GGUF
+(~6.6 GB with its vision projector) through llama.cpp's OpenAI-compatible server,
+keeps layout/OCR on the CPU, and renders with Microsoft JhengHei. Run everything
+from this folder in PowerShell.
+
+One-time setup, about 8 GB of downloads:
+
+```powershell
+# Layout/OCR packages (CPU PyTorch) and the `hf` downloader
+uv venv --python 3.12 .venv     # skip if .venv already exists
+uv pip install -p .venv -e ".[layout,manga,vl]"
+
+# llama.cpp v0.6.0 (build b11429), CUDA 13 build; needs a driver reporting CUDA 13.x
+$base = "https://github.com/ggml-org/llama.cpp/releases/download/b11429"
+foreach ($zip in "llama-b11429-bin-win-cuda-13.4-x64.zip", "cudart-llama-bin-win-cuda-13.4-x64.zip") {
+    curl.exe -fL -o "$env:TEMP\$zip" "$base/$zip"
+    Expand-Archive "$env:TEMP\$zip" bin\llama.cpp -Force
+}
+
+# Qwen3.5-9B Q4_K_M and its vision projector, at the revision pinned in configs/windows.yaml
+.venv\Scripts\hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-Q4_K_M.gguf mmproj-F16.gguf `
+    --revision 3885219b6810b007914f3a7950a8d1b469d598a5 --local-dir models\qwen3.5-9b
+
+.venv\Scripts\python -m manga_pipeline doctor --config configs/windows.yaml
+```
+
+`doctor` should report `font_exists`, `input_exists`, and all three
+`llama_cpp_files_present` entries as `true`. Put the chapter's pages in `input\`,
+then use two terminals:
+
+```powershell
+# Terminal 1: model server. Keep it open; Ctrl+C stops it.
+.venv\Scripts\python -m manga_pipeline serve --config configs/windows.yaml
+
+# Terminal 2: start once `curl.exe http://127.0.0.1:8000/health` prints {"status":"ok"}
+.venv\Scripts\python -m manga_pipeline run --config configs/windows.yaml --stage all
+```
+
+Results go to `output\chapter\` (layout below); `--stage` and `--force` work as
+described in [Stages and resume](#stages-and-resume). The first run also downloads
+the layout and OCR checkpoints (about 2.5 GB). They run on the CPU, so expect
+minutes per page.
+
+llama.cpp keeps 1 GB of GPU memory free and places layers that do not fit on the
+CPU, which is slower. Closing GPU-heavy apps (browsers, Discord, Steam) keeps the
+whole model on the GPU. If the server runs out of memory on large pages, lower
+`vlm.image_max_pixels`.
+
+### English pages
+
+Install the English reader once, then use `configs/windows-en.yaml` in both
+terminals (results go to `output\chapter-en\`):
+
+```powershell
+uv pip install -p .venv -e ".[english]"
+.venv\Scripts\python -m manga_pipeline serve --config configs/windows-en.yaml
+.venv\Scripts\python -m manga_pipeline run --config configs/windows-en.yaml --stage all
+```
+
+PaddleOCR's dependencies move numpy from 2.5 to 2.3 and PyYAML to 6.0.2, and add
+`opencv-contrib-python` beside `opencv-python`. The tests, layout detection and
+English OCR were checked with that combination. `windows.yaml` turns off
+PaddleOCR's oneDNN CPU acceleration, which crashes in PaddlePaddle 3.3.
+`reading_direction` stays `rtl` for translated manga; set `ltr` for Western comics.
+
 ## Install model environments when ready
 
+For Linux or WSL with vLLM; on Windows, follow the previous section instead.
 Use Python 3.11 or 3.12 for the model environments. Keep the serving engine
 separate from the local OCR dependencies. The existing CPU test `.venv` does not
 contain the model packages. These commands install packages, not an evaluated
@@ -107,7 +179,9 @@ the CPU checks. Record resolved versions with `uv pip freeze -p <env>` for a rea
 
 The default model configuration uses CPU for layout/OCR and one GPU for Qwen.
 This allows the Qwen server to remain loaded across audit, reconciliation,
-translation, and QA. **40 GB is device memory; `--mem=64G` is host RAM.**
+translation, and QA. **40 GB is device memory; `--mem=64G` is host RAM.** The
+default config now targets a 12 GB RTX 5070; on an A100 you can switch `vlm.model`
+back to a larger Qwen checkpoint.
 
 The launcher requests Ascend's `nextgen` partition, one GPU, and starts/stops its
 own Qwen server. It uses your script-first sbatch convention and environment stage
@@ -205,7 +279,11 @@ context and translation because their meaning may change. See
 
 ## What still needs real validation
 
-- Model loading and all CUDA/vLLM kernels on the actual A100 environment.
+- Model loading and inference on the RTX 5070, with llama.cpp on Windows or vLLM on
+  Linux/WSL (Blackwell needs a CUDA 12.8+ build). Neither server has been started here.
+- GPU memory with 16K context and two images per request. vLLM's ~9.1 GB checkpoint
+  needs other GPU apps closed. If either server runs out of memory, lower
+  `server.max_model_len` or `vlm.image_max_pixels`.
 - Missed-text recall, OCR character errors, translation accuracy, and pages/minute.
 - MangaLMM's extra benefit. Its endpoint must emit the documented JSON contracts;
   the published model was not tested with this prompting layer.

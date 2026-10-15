@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -310,7 +311,11 @@ def _run_command(cfg: dict, replacements: dict[str, str]) -> str:
     for placeholder, value in replacements.items():
         argv = [arg.replace("{" + placeholder + "}", value) for arg in argv]
     try:
-        completed = subprocess.run(argv, check=True, capture_output=True, text=True,
+        # Decode as UTF-8 regardless of the OS locale (e.g. cp932 on Japanese Windows),
+        # and ask Python bridges to emit UTF-8 on stdout.
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        completed = subprocess.run(argv, check=True, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", env=env,
                                    timeout=float(cfg.get("timeout_seconds", 300)), shell=False)
     except subprocess.TimeoutExpired as exc:
         raise AdapterError("External model command timed out.") from exc

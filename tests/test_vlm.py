@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
-from manga_pipeline.vlm import VLMClient, VLMError, VLMResponseError, _parse_json
+from manga_pipeline.prompts import TASK_PROMPTS, TASK_SCHEMAS
+from manga_pipeline.vlm import VLMClient, VLMError, VLMResponseError, _parse_json, _request_schema
 
 
 def response(value, finish_reason="stop"):
@@ -37,7 +38,7 @@ class VLMTests(unittest.TestCase):
     def test_http_contract_and_raw_response_logging(self):
         result = {"text": "待って！", "uncertain": False, "reason": "visible"}
         with tempfile.TemporaryDirectory() as directory:
-            client = VLMClient({"model": "local-qwen", "request_retries": 0,
+            client = VLMClient({"model": "local-qwen", "request_retries": 0, "top_k": 20, "repetition_penalty": 1.0,
                                 "api_key_env": "MANGA_TEST_KEY"}, Path(directory))
             with patch.dict(os.environ, {"MANGA_TEST_KEY": "private-test-key"}), \
                  patch("urllib.request.urlopen", return_value=response(result)) as mocked:
@@ -47,12 +48,27 @@ class VLMTests(unittest.TestCase):
             body = json.loads(request.data)
             self.assertEqual(body["model"], "local-qwen")
             self.assertFalse(body["chat_template_kwargs"]["enable_thinking"])
-            self.assertEqual(body["response_format"], {"type": "json_object"})
+            self.assertEqual((body["top_k"], body["repetition_penalty"], body["repeat_penalty"]), (20, 1.0, 1.0))
+            self.assertNotIn("top_p", body)
+            schema = body["response_format"]["json_schema"]["schema"]
+            self.assertEqual(body["response_format"]["type"], "json_schema")
+            self.assertEqual(schema["required"], ["text", "uncertain", "reason"])
             self.assertEqual(request.get_header("Authorization"), "Bearer private-test-key")
             logs = list(Path(directory).glob("*.response.txt"))
             self.assertEqual(len(logs), 1)
             self.assertNotIn("private-test-key", logs[0].read_text())
             self.assertIn("choices", json.loads(logs[0].read_text()))
+
+    def test_every_task_has_a_response_schema(self):
+        self.assertEqual(set(TASK_SCHEMAS), set(TASK_PROMPTS))
+
+    def test_request_schema_pins_region_ids(self):
+        payload = {"regions": [{"region_id": "a"}, {"region_id": "b"}]}
+        order = _request_schema("reading_order", payload)["properties"]["region_ids"]
+        self.assertEqual((order["items"], order["minItems"], order["maxItems"]), ({"enum": ["a", "b"]}, 2, 2))
+        translations = _request_schema("translate", payload)["properties"]["translations"]
+        self.assertEqual(translations["items"]["properties"]["region_id"], {"enum": ["a", "b"]})
+        self.assertNotIn("enum", str(TASK_SCHEMAS["reading_order"]))
 
     def test_retries_malformed_output_then_succeeds(self):
         good = {"text": "猫", "uncertain": False, "reason": "visible"}

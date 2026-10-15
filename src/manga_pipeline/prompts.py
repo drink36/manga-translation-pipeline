@@ -21,8 +21,10 @@ known_regions is empty, scan independently. Propose tight text bounding boxes;
 do not invent bubble or glyph segmentation masks. Output:
 {"regions":[{"bbox":[0,0,1000,1000],"kind":"text","reason":"visible evidence"}],
 "uncertain":false}. kind is "text" or "sfx". A genuinely text-free image may
-have an empty regions array. Agreement with another detector is not proof of
-complete coverage. Set uncertain when small or obscured writing cannot be read.
+have an empty regions array. Keep each reason to a few words, such as "speech
+bubble" or "sign"; do not copy the visible text into it. Agreement with another
+detector is not proof of complete coverage. Set uncertain when small or obscured
+writing cannot be read.
 """,
     "ocr": """Transcribe only the target text from the first image. Further
 images, if present, are surrounding visual context and are not additional text
@@ -95,6 +97,41 @@ only when issues is empty and visual evidence is adequate. For an issue that
 cannot be assigned to a region, use region_id="page". Inadequate visual
 evidence is an "other" issue, not a passing result.
 """,
+}
+
+
+def _object(properties: dict) -> dict:
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+_STRING, _BOOL = {"type": "string"}, {"type": "boolean"}
+_READING = _object({"text": _STRING, "uncertain": _BOOL, "reason": _STRING})
+
+# Servers constrain decoding to these shapes, so a reply cannot end before its
+# required fields; _validate_result still checks values and region IDs.
+TASK_SCHEMAS = {
+    "coverage": _object({
+        "regions": {"type": "array", "items": _object({
+            "bbox": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 1000}, "minItems": 4, "maxItems": 4},
+            "kind": {"enum": ["text", "sfx"]}, "reason": _STRING})},
+        "uncertain": _BOOL}),
+    "ocr": _READING,
+    "reconcile": _READING,
+    "reading_order": _object({"region_ids": {"type": "array", "items": _STRING}, "uncertain": _BOOL, "reason": _STRING}),
+    "context": _object({
+        "summary": _STRING,
+        "glossary": {"type": "array", "items": _object({
+            "source": _STRING, "target": _STRING, "status": {"enum": ["tentative", "confirmed"]},
+            "evidence": {"type": "array", "items": _STRING}})},
+        "characters": {"type": "array", "items": _object({"name": _STRING, "description": _STRING})}}),
+    "translate": _object({"translations": {"type": "array", "items": _object({
+        "region_id": _STRING, "text": _STRING, "uncertain": _BOOL, "reason": _STRING})}}),
+    "verify": _object({"checks": {"type": "array", "items": _object({
+        "region_id": _STRING, "passed": _BOOL, "issues": {"type": "array", "items": _STRING}})}}),
+    "visual_qa": _object({
+        "issues": {"type": "array", "items": _object({
+            "region_id": _STRING, "category": {"enum": ["mask", "layout", "translation", "other"]}, "reason": _STRING})},
+        "passed": _BOOL}),
 }
 
 

@@ -3,7 +3,7 @@
 The adapters are optional, lazy imports. Importing the package, planning a run,
 and running the synthetic demo do not download or instantiate model weights.
 Creating a real model adapter when running its stage can download its pinned
-checkpoint. No real model inference or A100 memory benchmark was performed while
+checkpoint. No real model inference or GPU memory benchmark was performed while
 creating this folder.
 
 ## Checkpoint choices
@@ -44,6 +44,11 @@ CUDA environment. Keep Qwen serving in its own environment. These are API
 targets derived from upstream sources, not a claim that the full GPU dependency
 stack has been tested here.
 
+On Windows, `configs/windows.yaml` sets `server.backend: llama.cpp`. `serve` then
+starts `server.executable` (llama.cpp's `llama-server`) with the GGUF weights in
+`server.model_path` and the vision projector in `server.mmproj_path` instead of
+vLLM. The pipeline sends the same OpenAI-compatible requests to either server.
+
 | Adapter | Additional dependencies |
 | --- | --- |
 | `koharu` | `rfdetr==1.7.0`, `safetensors>=0.8`, `huggingface-hub>=1.5,<2`, PyTorch/torchvision |
@@ -66,7 +71,7 @@ MangaOCR's published revision has a PyTorch `.bin` checkpoint; use modern
 PyTorch's restricted loading path, and do not bypass Transformers' version checks.
 
 Local adapters default to `device: cpu`. This permits Qwen to occupy the single
-40 GB A100 while local adapters run on the CPU, at a potentially substantial
+12 GB RTX 5070 (formerly a 40 GB A100) while local adapters run on the CPU, at a potentially substantial
 speed cost. In GPU stage scheduling, explicitly select `device: cuda` only after
 releasing the Qwen server's GPU memory. Calling `close()` releases the local
 adapter, but does not stop an independently running Qwen process. For Paddle VL,
@@ -116,7 +121,7 @@ timeout_seconds: 300
 Arguments are passed directly to `subprocess.run(..., shell=False)`. Placeholders
 are literal replacements. Shell syntax, environment expansion, pipes, and shell
 quoting are not evaluated. Paths containing spaces remain single arguments.
-The command must write JSON to `{output}`, or return JSON alone on stdout;
+The command must write UTF-8 JSON to `{output}`, or return UTF-8 JSON alone on stdout;
 send log messages to stderr. For a detector, return:
 
 ```json
