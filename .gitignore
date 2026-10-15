@@ -1,0 +1,13 @@
+.venv*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+models/
+logs/
+*.cbz
+review/overrides.json

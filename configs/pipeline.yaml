@@ -1,0 +1,129 @@
+# Default: public manga crop checkpoint + independent MangaOCR + Qwen.
+# Paths below resolve relative to THIS file. Use Python 3.11/3.12 for model extras.
+mode: real
+input: ../input
+output: ../output/chapter
+source_language: ja        # ja, en, auto, mixed; auto/mixed use the mixed OCR route
+reading_direction: rtl
+
+detector:
+  backend: koharu
+  model_id: mayocream/koharu-layout-rfdetr-seg-2xl-1152
+  revision: aed55fdb8ca953c6bec33cf6ed6dd52a9b72bfa2
+  device: cpu              # Use cuda only when GPU memory has been budgeted
+  thresholds: {text: 0.25, sfx: 0.20, bubble: 0.50, panel: 0.50}
+  fallback:
+    enabled: false
+    backend: command      # CTD bridge contract: docs/models.md
+    command: []
+
+audit:
+  enabled: true
+  always_tile: false      # true adds overlapping tile scans even when initial passes agree
+  tile_grid: [2, 2]
+  tile_overlap_pixels: 32
+  match_overlap: 0.6
+  detector_retry: true
+  mangalmm:
+    enabled: false
+    endpoint: http://127.0.0.1:8001/v1
+    model: hal-utokyo/MangaLMM
+    revision: a556fbc7edc256fbd6d3b4d8d3418dd5d68f7c27
+    max_tokens: 4096
+    image_max_pixels: 1600000
+    timeout_seconds: 300
+    request_retries: 1
+    enable_thinking: false
+
+ocr:
+  crop_padding: 8
+  qwen_blind_read: disagreements  # always reproduces your full independent Qwen OCR pass
+  routes:
+    ja: [paddle_vl, manga_ocr]
+    en: [paddle_english]
+    auto: [paddle_multilingual]
+    mixed: [paddle_multilingual]
+  readers:
+    paddle_vl:
+      backend: paddle_vl
+      # Public earlier-generation manga fine-tune. This is NOT VL-1.6.
+      # Requested 1.6 candidate: configs/paddle-vl16-candidate.yaml.
+      model_id: jzhang533/PaddleOCR-VL-For-Manga
+      revision: 1e8aa5f1dd90cc86fe9137c9c0b26ebde613cfe8
+      device: cpu
+      max_new_tokens: 512
+    manga_ocr:
+      backend: manga_ocr
+      model_id: kha-white/manga-ocr-base
+      revision: aa6573bd10b0d446cbf622e29c3e084914df9741
+      device: cpu
+    paddle_english:
+      backend: paddle_ocr
+      language: en
+      device: cpu
+    paddle_multilingual:
+      backend: paddle_vl
+      model_id: PaddlePaddle/PaddleOCR-VL-1.6
+      revision: c5630abae1d940eafe0697512a0325494b02ab42
+      device: cpu
+      max_new_tokens: 512
+
+vlm:
+  endpoint: http://127.0.0.1:8000/v1
+  model: cyankiwi/Qwen3.8-27B-AWQ-INT4
+  revision: 6e134bae811fb5adac50ee042ae5f029ac6779aa
+  api_key_env: null
+  timeout_seconds: 300
+  max_tokens: 4096
+  image_max_pixels: 1600000
+  request_retries: 1
+  temperature: 0.1
+  enable_thinking: false
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  tensor_parallel_size: 1
+  max_model_len: 16384
+  max_num_seqs: 1
+  max_num_batched_tokens: 4096
+  gpu_memory_utilization: 0.85
+  dtype: bfloat16
+
+retries:
+  region_retries: 1
+  ocr_retries: 1
+  translation_retries: 2
+  layout_retries: 1
+
+context:
+  pages_per_chunk: 3
+  max_summary_chars: 4000
+  max_glossary_entries: 100
+  max_characters: 40
+
+review:
+  overrides_path: ../review/overrides.json
+  flag_arbitrated_ocr: true
+
+render:
+  font_path: /usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc
+  font_index: 3             # Traditional Chinese face in the installed Noto TTC
+  font_size_min: 14
+  font_size_max: 44
+  padding: 8
+  line_spacing: 1.2
+  mask_dilation: 1
+  render_uncertain: false
+  direction: horizontal
+  sfx_policy: preserve
+  inpaint:
+    backend: auto          # White fill; artwork stays unchanged if no local LaMa weights
+    torchscript_path: null
+    device: cpu
+    signature: image_mask
+
+qa:
+  visual_enabled: true
+export:
+  cbz: true

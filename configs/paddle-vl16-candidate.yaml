@@ -1,0 +1,10 @@
+# Requested manga-specific 1.6 candidate. Public access returned HTTP 401 during
+# setup. Use only after verifying your access and checkpoint provenance.
+# No automatic fallback is performed if access fails.
+extends: pipeline.yaml
+output: ../output/chapter-vl16-candidate
+ocr:
+  readers:
+    paddle_vl:
+      model_id: AlphaBeta07/PaddleOCR-VL-1.6-For-Manga
+      revision: 103c97c277d688b31b8adb1bb2228380b77a640b

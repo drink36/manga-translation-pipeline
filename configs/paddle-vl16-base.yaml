@@ -1,0 +1,8 @@
+# Public official 1.6 base, not manga-fine-tuned. Keeps independent MangaOCR.
+extends: pipeline.yaml
+output: ../output/chapter-vl16-base
+ocr:
+  readers:
+    paddle_vl:
+      model_id: PaddlePaddle/PaddleOCR-VL-1.6
+      revision: c5630abae1d940eafe0697512a0325494b02ab42

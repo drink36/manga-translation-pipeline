@@ -1,0 +1,326 @@
+"""Offline orchestration regression tests using synthetic pages and model mocks."""
+
+import copy
+import json
+from pathlib import Path
+from unittest.mock import patch
+import zipfile
+
+import pytest
+import yaml
+from PIL import Image
+
+from manga_pipeline.config import load_config
+from manga_pipeline.demo import DemoVLM, create_demo
+from manga_pipeline.geometry import normalize
+from manga_pipeline.pipeline import Pipeline
+from manga_pipeline.storage import file_hash
+
+
+class ScriptedVLM:
+    def __init__(self, handler):
+        self.handler = handler
+        self.calls = []
+
+    def ask(self, task, payload, images=None):
+        self.calls.append((task, copy.deepcopy(payload), len(images or [])))
+        return self.handler(task, payload)
+
+
+@pytest.fixture
+def subject(tmp_path):
+    source = tmp_path / "page.png"
+    Image.new("RGB", (160, 120), "white").save(source)
+    cfg = {
+        "mode": "real", "input": str(source), "output": str(tmp_path / "output"),
+        "source_language": "ja", "reading_direction": "rtl",
+        "vlm": {"model": "mock-vision"},
+        "audit": {"enabled": True, "match_overlap": 0.6},
+        "ocr": {"qwen_blind_read": "always"},
+        "review": {"flag_arbitrated_ocr": True},
+        "retries": {"region_retries": 0, "ocr_retries": 1,
+                    "translation_retries": 1, "layout_retries": 1},
+        "render": {"font_size_min": 10, "font_size_max": 24, "sfx_policy": "preserve"},
+        "qa": {"visual_enabled": True}, "export": {"cbz": False},
+    }
+    pipeline = Pipeline(cfg)
+    page = {
+        "page_id": "p0001", "width": 160, "height": 120, "source_path": str(source),
+        "regions": [], "layouts": [], "issues": [],
+    }
+    region = pipeline._region({"bbox": [20, 20, 70, 70], "kind": "text"}, page, 1)
+    region.update(crop_bbox=[20, 20, 70, 70], original_text="猫", ocr_candidates={
+        "reader_a": {"text": "猫"}, "reader_b": {"text": "猫"},
+    })
+    page["regions"] = [region]
+    return pipeline, page
+
+
+def test_blind_ocr_receives_no_candidate_transcriptions(subject):
+    pipeline, page = subject
+    page["regions"][0]["ocr_candidates"]["reader_b"]["text"] = "犬"
+
+    def respond(task, payload):
+        if task in {"ocr", "reconcile"}:
+            return {"text": "猫", "uncertain": False, "reason": "visible characters"}
+        if task == "reading_order":
+            return {"region_ids": ["p0001_r0001"], "uncertain": False, "reason": "single region"}
+        raise AssertionError(task)
+
+    pipeline._vlm = ScriptedVLM(respond)
+    result = pipeline.stage_reconcile(page)
+    first_ocr = next(payload for task, payload, _ in pipeline.vlm.calls if task == "ocr")
+    assert set(first_ocr) == {"region_id", "language"}
+    reconciliation = next(payload for task, payload, _ in pipeline.vlm.calls if task == "reconcile")
+    assert reconciliation["candidates"] == {"reader_a": "猫", "reader_b": "犬", "qwen_blind": "猫"}
+    assert result["regions"][0]["status"] == "needs_review"
+    assert "ocr_disagreement_arbitrated" in result["regions"][0]["uncertainty"]
+
+
+def test_ocr_retries_are_bounded_and_unresolved_text_stays_flagged(subject):
+    pipeline, page = subject
+    page["regions"][0]["ocr_candidates"]["reader_b"]["text"] = "犬"
+
+    def respond(task, payload):
+        if task in {"ocr", "reconcile"}:
+            return {"text": "猫?", "uncertain": True, "reason": "small ambiguous character"}
+        return {"region_ids": ["p0001_r0001"], "uncertain": False, "reason": "single region"}
+
+    pipeline._vlm = ScriptedVLM(respond)
+    result = pipeline.stage_reconcile(page)
+    assert sum(task == "reconcile" for task, *_ in pipeline.vlm.calls) == 2
+    assert sum(task == "ocr" for task, *_ in pipeline.vlm.calls) == 2
+    assert "ocr_disagreement_unresolved" in result["regions"][0]["uncertainty"]
+
+
+def test_source_uncertainty_survives_passing_translation_verifier(subject):
+    pipeline, page = subject
+    page["regions"][0]["uncertainty"] = ["ocr_disagreement_arbitrated"]
+
+    def respond(task, payload):
+        if task == "translate":
+            return {"translations": [{"region_id": "p0001_r0001", "text": "貓", "uncertain": False, "reason": ""}]}
+        return {"checks": [{"region_id": "p0001_r0001", "passed": True, "issues": []}]}
+
+    pipeline._vlm = ScriptedVLM(respond)
+    with patch.object(pipeline, "read_context", return_value={}):
+        result = pipeline.stage_translate(page)
+    translation = result["regions"][0]["translation"]
+    assert translation["status"] == "needs_review"
+    assert "source_requires_review" in translation["issues"]
+
+
+def test_translation_uncertainty_is_not_cleared_by_verifier_and_retry_is_bounded(subject):
+    pipeline, page = subject
+
+    def respond(task, payload):
+        if task == "translate":
+            return {"translations": [{"region_id": "p0001_r0001", "text": "貓", "uncertain": True, "reason": "uncertain name"}]}
+        return {"checks": [{"region_id": "p0001_r0001", "passed": True, "issues": []}]}
+
+    pipeline._vlm = ScriptedVLM(respond)
+    with patch.object(pipeline, "read_context", return_value={}):
+        result = pipeline.stage_translate(page)
+    assert sum(task == "translate" for task, *_ in pipeline.vlm.calls) == 2
+    assert result["regions"][0]["translation"]["status"] == "needs_review"
+    second = [payload for task, payload, _ in pipeline.vlm.calls if task == "translate"][1]
+    assert "uncertain name" in second["prior_issues"]["p0001_r0001"]
+
+
+def test_audit_flags_detector_only_regions_instead_of_silent_agreement(subject):
+    pipeline, page = subject
+    pipeline._vlm = ScriptedVLM(lambda *_: {"regions": [], "uncertain": False})
+    result = pipeline.stage_audit(page)
+    assert len(result["regions"]) == 1  # Preserve the detector's evidence.
+    assert (result["coverage"]["status"] == "needs_review"
+            or result["regions"][0]["status"] == "needs_review")
+
+
+def test_audit_does_not_discard_material_extension_of_detected_text(subject):
+    pipeline, page = subject
+    page["regions"][0]["bbox"] = [20, 20, 40, 40]
+    proposal = {"bbox": normalize([20, 20, 120, 40], 160, 120), "kind": "text", "reason": "entire line"}
+    pipeline._vlm = ScriptedVLM(lambda *_: {"regions": [proposal], "uncertain": False})
+    result = pipeline.stage_audit(page)
+    assert (any(r["bbox"][2] >= 120 for r in result["regions"])
+            or result["coverage"]["status"] == "needs_review"
+            or any(r["status"] == "needs_review" for r in result["regions"]))
+
+
+def test_qa_rerender_does_not_mutate_render_stage_artifact(subject):
+    pipeline, page = subject
+    initial = pipeline.store.root / "rendered" / "p0001.png"
+    initial.parent.mkdir(parents=True)
+    Image.new("RGB", (160, 120), "white").save(initial)
+    page["render"] = {"output_path": str(initial), "issues": []}
+    inputs = {"artifacts": {}}
+    path = pipeline.store.path("p0001", "render")
+    pipeline.store.save(path, page, pipeline.store.fingerprint("render", inputs), "render", inputs)
+    before = file_hash(initial)
+    results = iter([
+        {"passed": False, "issues": [{"region_id": "p0001_r0001", "category": "mask", "reason": "residual text"}]},
+        {"passed": True, "issues": []},
+    ])
+    pipeline._vlm = ScriptedVLM(lambda *_: next(results))
+
+    def rerender(page, directory, cfg):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        output = directory / "p0001.png"
+        Image.new("RGB", (160, 120), "black").save(output)
+        return {"output_path": str(output), "issues": []}
+
+    with patch("manga_pipeline.rendering.render_page", side_effect=rerender):
+        result = pipeline.stage_qa(copy.deepcopy(page))
+    assert result["visual_qa"]["status"] == "auto_passed"
+    assert file_hash(initial) == before
+    assert pipeline.store.required("p0001", "render")
+
+
+def test_page_scoped_visual_issue_is_accepted_and_exported(subject):
+    pipeline, page = subject
+    page["render"] = {"output_path": page["source_path"], "issues": []}
+    pipeline._vlm = ScriptedVLM(lambda *_: {
+        "passed": False,
+        "issues": [{"region_id": "page", "category": "other", "reason": "image contrast insufficient to inspect"}],
+    })
+    result = pipeline.stage_qa(page)
+    assert result["visual_qa"]["status"] == "needs_review"
+    with patch.object(pipeline, "page_ids", return_value=["p0001"]), \
+         patch.object(pipeline.store, "required", return_value=result), \
+         patch.object(pipeline, "read_context", return_value={}):
+        exported = pipeline.export()
+    assert exported["status"] == "needs_review"
+    assert any("image contrast insufficient to inspect" in item["issues"]
+               for item in exported["review_items"])
+
+
+def test_required_rejects_transitively_stale_artifact(subject):
+    pipeline, page = subject
+    previous = None
+    for stage in ("prepare", "detect", "audit"):
+        inputs = {"artifacts": {str(previous): file_hash(previous)}} if previous else {"artifacts": {}}
+        path = pipeline.store.path("p0001", stage)
+        pipeline.store.save(path, copy.deepcopy(page), pipeline.store.fingerprint(stage, inputs), stage, inputs)
+        previous = path
+    assert pipeline.store.required("p0001", "audit")
+    changed = copy.deepcopy(page)
+    changed["new_source_annotation"] = "updated"
+    inputs = {"artifacts": {}}
+    pipeline.store.save(pipeline.store.path("p0001", "prepare"), changed,
+                        pipeline.store.fingerprint("prepare", inputs), "prepare", inputs)
+    with pytest.raises(ValueError, match="[Ss]tale|changed|rerun"):
+        pipeline.store.required("p0001", "audit")
+
+
+def test_export_keeps_source_review_flag_even_when_visual_qa_passes(subject):
+    pipeline, page = subject
+    page["regions"][0]["uncertainty"] = ["reading_order_uncertain"]
+    page["regions"][0]["translation"] = {"text": "貓", "status": "needs_review", "issues": ["source_requires_review"]}
+    page["render"] = {"output_path": page["source_path"], "issues": []}
+    page["visual_qa"] = {"status": "auto_passed", "attempts": [{"passed": True, "issues": []}]}
+    with patch.object(pipeline, "page_ids", return_value=["p0001"]), \
+         patch.object(pipeline.store, "required", return_value=page), \
+         patch.object(pipeline, "read_context", return_value={}):
+        exported = pipeline.export()
+    assert exported["status"] == "needs_review"
+    assert "reading_order_uncertain" in exported["review_items"][0]["issues"]
+
+
+def _artifact_snapshot(output, stages):
+    paths = [path for path in (output / "pages").glob("*/*.json") if path.stem in stages]
+    if "context" in stages:
+        paths.append(output / "context.json")
+    return {str(path.relative_to(output)): (file_hash(path), path.stat().st_mtime_ns) for path in paths}
+
+
+def _edit_demo_config(path, update):
+    value = yaml.safe_load(path.read_text())
+    update(value)
+    path.write_text(yaml.safe_dump(value, allow_unicode=True, sort_keys=False))
+    return load_config(path)
+
+
+def test_demo_full_export_and_cached_rerun_need_no_model_requests(tmp_path):
+    config_path = create_demo(tmp_path / "demo")
+    cfg = load_config(config_path)
+    with patch("urllib.request.urlopen", side_effect=AssertionError("Demo must not access a server")):
+        Pipeline(cfg).run()
+    output = Path(cfg["output"])
+    chapter = json.loads((output / "export" / "chapter.json").read_text())
+    assert chapter["mode"] == "demo"
+    assert chapter["status"] == "auto_passed"
+    assert chapter["review_items"] == []
+    assert [page["page_id"] for page in chapter["pages"]] == ["p0001", "p0002"]
+    for page in chapter["pages"]:
+        assert Path(page["render"]["output_path"]).is_file()
+        assert page["regions"][0]["translation"]["text"]
+        assert page["visual_qa"]["status"] == "auto_passed"
+    for name in ("original.cbz", "translated.demo.cbz"):
+        with zipfile.ZipFile(output / "export" / name) as archive:
+            assert len(archive.namelist()) == 2
+            assert archive.testzip() is None
+    stages = {"prepare", "detect", "audit", "ocr", "reconcile", "context", "translate", "render", "qa"}
+    before = _artifact_snapshot(output, stages)
+    with patch.object(DemoVLM, "ask", side_effect=AssertionError("Cached rerun must not request inference")):
+        Pipeline(load_config(config_path)).run()
+    assert _artifact_snapshot(output, stages) == before
+
+
+def test_demo_translation_override_reuses_ocr_reconcile_and_context(tmp_path):
+    config_path = create_demo(tmp_path / "demo")
+    cfg = load_config(config_path)
+    Pipeline(cfg).run()
+    output = Path(cfg["output"])
+    upstream = {"prepare", "detect", "audit", "ocr", "reconcile", "context"}
+    before = _artifact_snapshot(output, upstream)
+    overrides = config_path.parent / "review.json"
+    overrides.write_text(json.dumps({"p0001_r0001": {"translation": "Reviewed text"}}))
+    cfg = _edit_demo_config(config_path, lambda value: value.update(review={"overrides_path": "review.json"}))
+    calls = []
+    original_ask = DemoVLM.ask
+
+    def recording_ask(self, task, payload, images=None):
+        calls.append(task)
+        return original_ask(self, task, payload, images)
+
+    with patch.object(DemoVLM, "ask", recording_ask):
+        Pipeline(cfg).run()
+    assert _artifact_snapshot(output, upstream) == before
+    assert not set(calls).intersection({"coverage", "ocr", "reconcile", "reading_order", "context"})
+    assert "visual_qa" in calls
+    chapter = json.loads((output / "export" / "chapter.json").read_text())
+    translation = chapter["pages"][0]["regions"][0]["translation"]
+    assert translation["text"] == "Reviewed text"
+    assert translation["status"] == "human_reviewed"
+    assert translation["origin"] == "review_overrides"
+    assert chapter["status"] == "auto_passed"  # Automation never labels the whole chapter human-reviewed.
+
+
+def test_demo_render_config_change_reuses_all_model_work_except_visual_qa(tmp_path):
+    config_path = create_demo(tmp_path / "demo")
+    cfg = load_config(config_path)
+    Pipeline(cfg).run()
+    output = Path(cfg["output"])
+    upstream = {"prepare", "detect", "audit", "ocr", "reconcile", "context", "translate"}
+    before = _artifact_snapshot(output, upstream)
+    render_before = _artifact_snapshot(output, {"render", "qa"})
+
+    def change_font(value):
+        value["render"]["font_size_max"] = value["render"]["font_size_max"] - 2
+
+    cfg = _edit_demo_config(config_path, change_font)
+    calls = []
+    original_ask = DemoVLM.ask
+
+    def recording_ask(self, task, payload, images=None):
+        calls.append(task)
+        return original_ask(self, task, payload, images)
+
+    with patch.object(DemoVLM, "ask", recording_ask):
+        Pipeline(cfg).run()
+    assert _artifact_snapshot(output, upstream) == before
+    assert _artifact_snapshot(output, {"render", "qa"}) != render_before
+    assert calls == ["visual_qa", "visual_qa"]
+    chapter = json.loads((output / "export" / "chapter.json").read_text())
+    assert chapter["status"] == "auto_passed"
