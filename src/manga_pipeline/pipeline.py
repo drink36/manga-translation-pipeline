@@ -14,7 +14,7 @@ from PIL import Image, ImageOps
 
 from .config import STAGES, digest
 from .geometry import area, associate, checked_box, covered_fraction, denormalize, intersection, normalize, overlap, padded, polygon
-from .storage import Store, file_hash, natural_key, read_json, write_json
+from .storage import Store, natural_key, read_json, write_json
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PREVIOUS = {"detect": "prepare", "audit": "detect", "ocr": "audit", "reconcile": "ocr", "translate": "reconcile", "render": "translate", "qa": "render"}
@@ -93,6 +93,7 @@ class Pipeline:
         stages = STAGES if stage == "all" else (stage,)
         if any(s not in STAGES for s in stages):
             raise ValueError(f"Unknown stage {stage}")
+        self.store.forget_verified()  # Files may have changed since a previous run.
         try:
             for current in stages:
                 print(f"[{current}] mode={'SCRIPTED DEMO' if self.demo else 'real'}", flush=True)
@@ -176,13 +177,13 @@ class Pipeline:
     def page_stage(self, stage, page_id, force=False):
         previous = PREVIOUS[stage]
         page = copy.deepcopy(self.store.required(page_id, previous))
-        inputs = {"artifacts": {str(self.store.path(page_id, previous)): file_hash(self.store.path(page_id, previous))}}
+        inputs = {"artifacts": {str(self.store.path(page_id, previous)): self.store.hash(self.store.path(page_id, previous))}}
         if stage == "translate":
             context_path = self.store.root / "context.json"
             if not context_path.is_file():
                 raise ValueError("Run context before translate")
-            context = self.read_context()
-            inputs["artifacts"][str(context_path)] = file_hash(context_path)
+            self.read_context()
+            inputs["artifacts"][str(context_path)] = self.store.hash(context_path)
         fingerprint = self.store.fingerprint(stage, inputs)
         path = self.store.path(page_id, stage)
         if self.store.cached(path, fingerprint, force):
@@ -470,7 +471,7 @@ class Pipeline:
 
     def context(self, force=False):
         pages = [self.store.required(p, "reconcile") for p in self.page_ids()]
-        inputs = {"artifacts": {str(self.store.path(p["page_id"], "reconcile")): file_hash(self.store.path(p["page_id"], "reconcile")) for p in pages}}
+        inputs = {"artifacts": {str(self.store.path(p["page_id"], "reconcile")): self.store.hash(self.store.path(p["page_id"], "reconcile")) for p in pages}}
         fingerprint = self.store.fingerprint("context", inputs)
         path = self.store.root / "context.json"
         if self.store.cached(path, fingerprint, force):
@@ -492,15 +493,8 @@ class Pipeline:
         self.store.save(path, {"context": context, "chunks": chunks}, fingerprint, "context", inputs)
 
     def read_context(self):
-        path = self.store.root / "context.json"
-        value = self.store.required_path(path)
-        inputs = value.get("_meta", {}).get("inputs")
-        if self.store.cached(path, self.store.fingerprint("context", inputs)) is None:
-            raise ValueError("Chapter context is stale; rerun context")
-        for dep, expected in inputs.get("artifacts", {}).items():
-            if not Path(dep).is_file() or file_hash(Path(dep)) != expected:
-                raise ValueError("OCR changed; rerun chapter context")
-        return value["context"]
+        # Verifies the context and, transitively, the OCR of every page it was built from.
+        return self.store.required_path(self.store.root / "context.json")["context"]
 
     def stage_translate(self, page):
         image = Image.open(page["source_path"]).convert("RGB")

@@ -16,7 +16,7 @@ from manga_pipeline.config import load_config
 from manga_pipeline.demo import DemoVLM, create_demo
 from manga_pipeline.geometry import associate, normalize
 from manga_pipeline.pipeline import Pipeline
-from manga_pipeline.storage import file_hash
+from manga_pipeline.storage import file_hash, write_json
 
 
 class ScriptedVLM:
@@ -398,6 +398,32 @@ def test_demo_full_export_and_cached_rerun_need_no_model_requests(tmp_path):
     with patch.object(DemoVLM, "ask", side_effect=AssertionError("Cached rerun must not request inference")):
         Pipeline(load_config(config_path)).run()
     assert _artifact_snapshot(output, stages) == before
+
+
+def test_cached_rerun_hashes_each_file_at_most_once(tmp_path):
+    # Verification used to re-walk the whole chapter for every page, re-hashing images quadratically.
+    config_path = create_demo(tmp_path / "demo")
+    Pipeline(load_config(config_path)).run()
+    hashed = []
+
+    def recording_hash(path):
+        hashed.append(str(path))
+        return file_hash(path)
+
+    with patch("manga_pipeline.storage.file_hash", side_effect=recording_hash):
+        Pipeline(load_config(config_path)).run()
+    assert hashed and len(hashed) == len(set(hashed))
+
+
+def test_new_run_rechecks_prerequisites_edited_since_the_previous_run(tmp_path):
+    pipeline = Pipeline(load_config(create_demo(tmp_path / "demo")))
+    pipeline.run()
+    ocr = pipeline.store.path("p0001", "ocr")
+    edited = json.loads(ocr.read_text(encoding="utf-8"))
+    edited["regions"][0]["original_text"] = "edited outside the pipeline"
+    write_json(ocr, edited)
+    with pytest.raises(ValueError, match="Stale prerequisite"):
+        pipeline.run("translate")
 
 
 def test_demo_translation_override_reuses_ocr_reconcile_and_context(tmp_path):
