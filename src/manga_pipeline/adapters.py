@@ -252,7 +252,9 @@ class PaddleVLReader:
         inputs = self.processor(text=[prompt], images=[image], return_tensors="pt")
         inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
         with torch.inference_mode():
-            outputs = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            # The published manga checkpoints ship use_cache: false (a training setting).
+            # Without the KV cache every new token re-processes the whole image prompt.
+            outputs = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False, use_cache=True)
         generated = outputs[:, inputs["input_ids"].shape[1]:]
         eos = self.model.generation_config.eos_token_id
         eos = eos if isinstance(eos, list) else [eos]
