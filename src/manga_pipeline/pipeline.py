@@ -556,7 +556,7 @@ class Pipeline:
         return page
 
     def stage_qa(self, page):
-        from .rendering import render_page
+        from .rendering import FONT_SIZE_MAX, FONT_SIZE_MIN, render_page
         cfg = self.cfg.get("qa", {})
         page["visual_qa"] = {"status": "not_checked", "attempts": []}
         if not cfg.get("visual_enabled", True):
@@ -580,12 +580,18 @@ class Pipeline:
             if attempt >= self.cfg.get("retries", {}).get("layout_retries", 1):
                 break
             categories = {issue["category"] for issue in verdict["issues"]}
-            if not categories.intersection({"mask", "layout"}):
-                break
+            adjusted = copy.deepcopy(render_cfg)
             if "mask" in categories:
-                render_cfg["mask_dilation"] = min(3, render_cfg.get("mask_dilation", 1) + 1)
+                # Grow the erasure by one pixel up to 3, but never shrink a configured dilation.
+                dilation = int(render_cfg.get("mask_dilation", 1))
+                adjusted["mask_dilation"] = max(dilation, min(3, dilation + 1))
             if "layout" in categories:
-                render_cfg["font_size_max"] = max(render_cfg.get("font_size_min", 14), int(render_cfg.get("font_size_max", 40) * 0.85))
+                minimum = int(render_cfg.get("font_size_min", FONT_SIZE_MIN))
+                maximum = int(render_cfg.get("font_size_max", FONT_SIZE_MAX))
+                adjusted["font_size_max"] = min(maximum, max(minimum, int(maximum * 0.85)))
+            if adjusted == render_cfg:
+                break  # Nothing left to adjust; an identical re-render would prove nothing.
+            render_cfg = adjusted
             # Re-run cleaning AND typesetting from original for either feedback class.
             page["render"] = render_page(page, self.store.root / "rendered" / "qa" / f"attempt-{attempt + 1:02}", render_cfg)
         return page

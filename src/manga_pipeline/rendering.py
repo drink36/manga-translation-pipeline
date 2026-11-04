@@ -17,6 +17,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
+FONT_SIZE_MIN = 10
+FONT_SIZE_MAX = 48
+
+
 class FontError(ValueError):
     """A font cannot render the requested translation."""
 
@@ -156,8 +160,8 @@ def _fit_text(text: str, size: tuple[int, int], box: tuple[int, int, int, int],
     usable_height = box[3] - box[1] - 2 * padding
     if usable_width < 1 or usable_height < 1:
         raise ValueError("No text area remains after padding.")
-    minimum = max(1, int(cfg.get("font_size_min", 10)))
-    maximum = max(minimum, int(cfg.get("font_size_max", 48)))
+    minimum = max(1, int(cfg.get("font_size_min", FONT_SIZE_MIN)))
+    maximum = max(minimum, int(cfg.get("font_size_max", FONT_SIZE_MAX)))
     spacing = max(1.0, float(cfg.get("line_spacing", 1.15)))
     safe_area = _morph(allowed, padding, dilate=False)
     for font_size in range(maximum, minimum - 1, -1):

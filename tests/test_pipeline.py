@@ -265,6 +265,29 @@ def test_qa_rerender_does_not_mutate_render_stage_artifact(subject):
     assert pipeline.store.required("p0001", "render")
 
 
+@pytest.mark.parametrize("category,setting,configured,expected", [
+    ("mask", "mask_dilation", 1, [2]),
+    ("mask", "mask_dilation", 3, []),
+    ("mask", "mask_dilation", 5, []),  # Must not be "adjusted" down to 3.
+    ("layout", "font_size_max", 20, [17]),
+    ("layout", "font_size_max", 10, []),  # Already at font_size_min.
+])
+def test_visual_retry_rerenders_only_when_a_setting_can_still_improve(subject, category, setting, configured, expected):
+    pipeline, page = subject
+    pipeline.cfg["render"][setting] = configured
+    page["render"] = {"output_path": page["source_path"], "issues": []}
+    issue = {"region_id": "p0001_r0001", "category": category, "reason": "visible defect"}
+    pipeline._vlm = ScriptedVLM(lambda *_: {"passed": False, "issues": [issue]})
+
+    def rerender(page, directory, cfg):
+        return {"output_path": page["source_path"], "issues": []}
+
+    with patch("manga_pipeline.rendering.render_page", side_effect=rerender) as mocked:
+        result = pipeline.stage_qa(page)
+    assert [call.args[2][setting] for call in mocked.call_args_list] == expected
+    assert result["visual_qa"]["status"] == "needs_review"
+
+
 def test_page_scoped_visual_issue_is_accepted_and_exported(subject):
     pipeline, page = subject
     page["render"] = {"output_path": page["source_path"], "issues": []}
