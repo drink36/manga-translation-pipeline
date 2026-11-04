@@ -93,6 +93,43 @@ def test_ocr_retries_are_bounded_and_unresolved_text_stays_flagged(subject):
     assert "ocr_disagreement_unresolved" in result["regions"][0]["uncertainty"]
 
 
+@pytest.mark.parametrize("policy", ["disagreements", "always"])
+def test_single_reader_route_is_confirmed_by_matching_blind_read(subject, policy):
+    pipeline, page = subject
+    pipeline.cfg["ocr"]["qwen_blind_read"] = policy
+    page["regions"][0]["ocr_candidates"] = {"paddle_english": {"text": "WAIT!"}}
+
+    def respond(task, payload):
+        if task == "ocr":
+            return {"text": "WAIT!", "uncertain": False, "reason": "visible characters"}
+        if task == "reading_order":
+            return {"region_ids": ["p0001_r0001"], "uncertain": False, "reason": "single region"}
+        raise AssertionError(f"Two matching independent readings need no {task}")
+
+    pipeline._vlm = ScriptedVLM(respond)
+    region = pipeline.stage_reconcile(page)["regions"][0]
+    assert region["ocr_decision"] == "independent_transcriptions_agree"
+    assert region["original_text"] == "WAIT!"
+    assert region["uncertainty"] == [] and region["status"] == "auto_passed"
+
+
+def test_single_reader_route_still_arbitrates_a_mismatching_blind_read(subject):
+    pipeline, page = subject
+    page["regions"][0]["ocr_candidates"] = {"paddle_english": {"text": "WAIT!"}}
+
+    def respond(task, payload):
+        if task == "ocr":
+            return {"text": "WAIT?", "uncertain": False, "reason": "visible characters"}
+        if task == "reconcile":
+            return {"text": "WAIT!", "uncertain": False, "reason": "exclamation mark is visible"}
+        return {"region_ids": ["p0001_r0001"], "uncertain": False, "reason": "single region"}
+
+    pipeline._vlm = ScriptedVLM(respond)
+    region = pipeline.stage_reconcile(page)["regions"][0]
+    assert region["ocr_decision"] == "vlm_arbitrated"
+    assert "ocr_disagreement_arbitrated" in region["uncertainty"]
+
+
 def test_source_uncertainty_survives_passing_translation_verifier(subject):
     pipeline, page = subject
     page["regions"][0]["uncertainty"] = ["ocr_disagreement_arbitrated"]

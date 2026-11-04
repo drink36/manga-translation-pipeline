@@ -31,6 +31,11 @@ def normalized_text(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def readings_agree(readings: list[str]) -> bool:
+    """At least two independent, nonempty readings that match apart from whitespace."""
+    return len(readings) >= 2 and all(r.strip() for r in readings) and len({normalized_text(r) for r in readings}) == 1
+
+
 class Pipeline:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -403,15 +408,15 @@ class Pipeline:
                 continue
             candidates = {k: v["text"] for k, v in region["ocr_candidates"].items()}
             values = list(candidates.values())
-            agreement = bool(values) and all(v.strip() for v in values) and len({normalized_text(v) for v in values}) == 1
-            if len(values) < 2:
-                agreement = False
+            agreement = readings_agree(values)
             crop = image.crop(region["crop_bbox"])
             if policy == "always" or not agreement:
                 response = self.vlm.ask("ocr", {"region_id": region["region_id"], "language": region["language"]}, [crop])
                 candidates["qwen_blind"] = response["text"]
                 region["ocr_candidates"]["qwen_blind"] = {"text": response["text"], "model_id": self.cfg["vlm"]["model"], "independent_input": True, "uncertain": response["uncertain"], "reason": response["reason"]}
-                agreement = agreement and not response["uncertain"] and normalized_text(values[0]) == normalized_text(response["text"])
+                # The blind read is itself an independent reading. On a single-reader
+                # route (en/auto/mixed) it is the second reading that can confirm the first.
+                agreement = not response["uncertain"] and readings_agree([*values, response["text"]])
             if agreement:
                 region["original_text"] = values[0]
                 region["ocr_decision"] = "independent_transcriptions_agree"

@@ -45,8 +45,11 @@ empty response is never converted into a passing result.
 
 The default only asks for Qwen's blind crop transcription on disagreements or a
 single-reader route. `ocr.qwen_blind_read: always` enables it on every text crop.
-The blind request contains no specialist transcription. Reconciliation then sees
-the candidates and the original crop plus surrounding visual context.
+The blind request contains no specialist transcription. On a single-reader route
+the blind read is the second independent reading: when it matches (ignoring
+whitespace) and is not marked uncertain, the region needs no arbitration. Otherwise
+reconciliation sees the candidates and the original crop plus surrounding visual
+context.
 
 Accepted automatic arbitration remains flagged by default. Set
 `review.flag_arbitrated_ocr: false` only if you want visually resolved arbitration
