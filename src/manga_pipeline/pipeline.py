@@ -7,7 +7,7 @@ import io
 import json
 import re
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -18,6 +18,13 @@ from .storage import Store, file_hash, natural_key, read_json, write_json
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PREVIOUS = {"detect": "prepare", "audit": "detect", "ocr": "audit", "reconcile": "ocr", "translate": "reconcile", "render": "translate", "qa": "render"}
+
+
+def is_page_name(name: str) -> bool:
+    """An image page, not a folder, hidden file or macOS metadata such as __MACOSX/._001.jpg."""
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    return (bool(parts) and not name.endswith("/") and PurePosixPath(parts[-1]).suffix.lower() in IMAGE_SUFFIXES
+            and not any(part.startswith(".") or part == "__MACOSX" for part in parts))
 
 
 def flag(region: dict, reason: str):
@@ -130,13 +137,13 @@ class Pipeline:
         records = []
         if source.is_file() and source.suffix.lower() in (".cbz", ".zip"):
             with zipfile.ZipFile(source) as zf:
-                names = sorted([n for n in zf.namelist() if Path(n).suffix.lower() in IMAGE_SUFFIXES and not n.endswith("/")], key=natural_key)
+                names = sorted([n for n in zf.namelist() if is_page_name(n)], key=natural_key)
                 for name in names:
                     records.append((f"{source}!{name}", zf.read(name), None))
         elif source.is_file() and source.suffix.lower() in IMAGE_SUFFIXES:
             records = [(str(source), source.read_bytes(), source.with_suffix(".fixture.json"))]
         elif source.is_dir():
-            for path in sorted([p for p in source.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES], key=natural_key):
+            for path in sorted([p for p in source.iterdir() if p.is_file() and is_page_name(p.name)], key=natural_key):
                 records.append((str(path), path.read_bytes(), path.with_suffix(".fixture.json")))
         else:
             raise ValueError(f"Input must be an image folder, image, or CBZ/ZIP: {source}")

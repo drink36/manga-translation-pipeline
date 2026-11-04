@@ -69,6 +69,7 @@ uv pip install -p .venv -e '.[test]'
 
 1. Put naturally numbered PNG/JPEG/WebP pages in `input/`, or change `input` to an
    image/CBZ/ZIP path. A folder is read at its top level, in natural filename order.
+   Hidden files and macOS metadata (`__MACOSX/`, `._*`) are skipped.
 2. Edit `configs/pipeline.yaml`: input/output, language, reading direction, model
    choices, font, and retry budgets. Paths are relative to the YAML file.
 3. Use `source_language: ja` or `en` when known. `auto` and `mixed` route all crops

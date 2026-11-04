@@ -1,6 +1,7 @@
 """Offline orchestration regression tests using synthetic pages and model mocks."""
 
 import copy
+import io
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,27 @@ def subject(tmp_path):
     })
     page["regions"] = [region]
     return pipeline, page
+
+
+def test_prepare_skips_macos_metadata_and_hidden_files(tmp_path):
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 48), "white").save(buffer, "PNG")
+    page = buffer.getvalue()
+    archive = tmp_path / "chapter.cbz"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("ch1/002.png", page)
+        zf.writestr("ch1/001.png", page)
+        zf.writestr("__MACOSX/ch1/._001.png", b"AppleDouble metadata, not an image")
+        zf.writestr("ch1/.hidden.png", b"not an image")
+    folder = tmp_path / "pages"
+    folder.mkdir()
+    (folder / "001.png").write_bytes(page)
+    (folder / "._001.png").write_bytes(b"AppleDouble metadata, not an image")
+    expected = {archive: [f"{archive}!ch1/001.png", f"{archive}!ch1/002.png"], folder: [str(folder / "001.png")]}
+    for source, names in expected.items():
+        pipeline = Pipeline({"mode": "real", "input": str(source), "output": str(tmp_path / f"out-{source.stem}")})
+        pipeline.prepare()
+        assert [pipeline.store.required(p, "prepare")["source_name"] for p in pipeline.page_ids()] == names
 
 
 def test_blind_ocr_receives_no_candidate_transcriptions(subject):
