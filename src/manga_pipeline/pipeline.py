@@ -7,17 +7,24 @@ import io
 import json
 import re
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 from PIL import Image, ImageOps
 
 from .config import STAGES, digest
 from .geometry import area, associate, checked_box, covered_fraction, denormalize, intersection, normalize, overlap, padded, polygon
-from .storage import Store, file_hash, natural_key, read_json, write_json
+from .storage import Store, natural_key, read_json, write_json
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PREVIOUS = {"detect": "prepare", "audit": "detect", "ocr": "audit", "reconcile": "ocr", "translate": "reconcile", "render": "translate", "qa": "render"}
+
+
+def is_page_name(name: str) -> bool:
+    """An image page, not a folder, hidden file or macOS metadata such as __MACOSX/._001.jpg."""
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    return (bool(parts) and not name.endswith("/") and PurePosixPath(parts[-1]).suffix.lower() in IMAGE_SUFFIXES
+            and not any(part.startswith(".") or part == "__MACOSX" for part in parts))
 
 
 def flag(region: dict, reason: str):
@@ -29,6 +36,11 @@ def flag(region: dict, reason: str):
 def normalized_text(text: str) -> str:
     # Preserve digits, punctuation, kana, negation, and full/half-width differences.
     return re.sub(r"\s+", "", text)
+
+
+def readings_agree(readings: list[str]) -> bool:
+    """At least two independent, nonempty readings that match apart from whitespace."""
+    return len(readings) >= 2 and all(r.strip() for r in readings) and len({normalized_text(r) for r in readings}) == 1
 
 
 class Pipeline:
@@ -81,6 +93,7 @@ class Pipeline:
         stages = STAGES if stage == "all" else (stage,)
         if any(s not in STAGES for s in stages):
             raise ValueError(f"Unknown stage {stage}")
+        self.store.forget_verified()  # Files may have changed since a previous run.
         try:
             for current in stages:
                 print(f"[{current}] mode={'SCRIPTED DEMO' if self.demo else 'real'}", flush=True)
@@ -125,13 +138,13 @@ class Pipeline:
         records = []
         if source.is_file() and source.suffix.lower() in (".cbz", ".zip"):
             with zipfile.ZipFile(source) as zf:
-                names = sorted([n for n in zf.namelist() if Path(n).suffix.lower() in IMAGE_SUFFIXES and not n.endswith("/")], key=natural_key)
+                names = sorted([n for n in zf.namelist() if is_page_name(n)], key=natural_key)
                 for name in names:
                     records.append((f"{source}!{name}", zf.read(name), None))
         elif source.is_file() and source.suffix.lower() in IMAGE_SUFFIXES:
             records = [(str(source), source.read_bytes(), source.with_suffix(".fixture.json"))]
         elif source.is_dir():
-            for path in sorted([p for p in source.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES], key=natural_key):
+            for path in sorted([p for p in source.iterdir() if p.is_file() and is_page_name(p.name)], key=natural_key):
                 records.append((str(path), path.read_bytes(), path.with_suffix(".fixture.json")))
         else:
             raise ValueError(f"Input must be an image folder, image, or CBZ/ZIP: {source}")
@@ -164,13 +177,13 @@ class Pipeline:
     def page_stage(self, stage, page_id, force=False):
         previous = PREVIOUS[stage]
         page = copy.deepcopy(self.store.required(page_id, previous))
-        inputs = {"artifacts": {str(self.store.path(page_id, previous)): file_hash(self.store.path(page_id, previous))}}
+        inputs = {"artifacts": {str(self.store.path(page_id, previous)): self.store.hash(self.store.path(page_id, previous))}}
         if stage == "translate":
             context_path = self.store.root / "context.json"
             if not context_path.is_file():
                 raise ValueError("Run context before translate")
-            context = self.read_context()
-            inputs["artifacts"][str(context_path)] = file_hash(context_path)
+            self.read_context()
+            inputs["artifacts"][str(context_path)] = self.store.hash(context_path)
         fingerprint = self.store.fingerprint(stage, inputs)
         path = self.store.path(page_id, stage)
         if self.store.cached(path, fingerprint, force):
@@ -235,6 +248,8 @@ class Pipeline:
         if not cfg.get("enabled", True):
             page["coverage"] = {"status": "not_checked"}
             page["issues"].append("coverage_not_checked")
+            # Grouping is geometric; it must not depend on the VLM coverage scan.
+            self._group_bubble_text(page)
             return page
         image = Image.open(page["source_path"]).convert("RGB")
         scan_payload = {"page_id": page["page_id"], "known_regions": [], "attempt": 0}
@@ -301,7 +316,7 @@ class Pipeline:
             path = directory / f"{region['region_id']}.png"
             image.crop(box).save(path)
             candidates = self.detector.detect(path, directory / region["region_id"])
-            global_mask = Image.new("L", image.size)
+            global_mask = np.zeros((image.height, image.width), dtype=bool)
             found = False
             for candidate in candidates:
                 if candidate["kind"] != region["kind"]:
@@ -312,14 +327,15 @@ class Pipeline:
                     continue
                 found = True
                 if candidate.get("mask_path"):
-                    mask = Image.open(candidate["mask_path"]).convert("L")
-                    global_mask.paste(mask, box[:2])
+                    with Image.open(candidate["mask_path"]) as mask:
+                        # Union: a later candidate must not erase an earlier candidate's glyphs.
+                        global_mask[box[1]:box[3], box[0]:box[2]] |= np.asarray(mask.convert("L")) > 127
             if found:
                 region["uncertainty"].remove("vlm_only_region_requires_confirmation")
                 region["status"] = "needs_review" if region["uncertainty"] else "auto_passed"
-                if global_mask.getbbox():
+                if global_mask.any():
                     mask_path = directory / f"{region['region_id']}.full_mask.png"
-                    global_mask.save(mask_path)
+                    Image.fromarray(global_mask.astype("uint8") * 255).save(mask_path)
                     region["mask_path"] = str(mask_path)
 
     def _group_bubble_text(self, page):
@@ -403,15 +419,15 @@ class Pipeline:
                 continue
             candidates = {k: v["text"] for k, v in region["ocr_candidates"].items()}
             values = list(candidates.values())
-            agreement = bool(values) and all(v.strip() for v in values) and len({normalized_text(v) for v in values}) == 1
-            if len(values) < 2:
-                agreement = False
+            agreement = readings_agree(values)
             crop = image.crop(region["crop_bbox"])
             if policy == "always" or not agreement:
                 response = self.vlm.ask("ocr", {"region_id": region["region_id"], "language": region["language"]}, [crop])
                 candidates["qwen_blind"] = response["text"]
                 region["ocr_candidates"]["qwen_blind"] = {"text": response["text"], "model_id": self.cfg["vlm"]["model"], "independent_input": True, "uncertain": response["uncertain"], "reason": response["reason"]}
-                agreement = agreement and not response["uncertain"] and normalized_text(values[0]) == normalized_text(response["text"])
+                # The blind read is itself an independent reading. On a single-reader
+                # route (en/auto/mixed) it is the second reading that can confirm the first.
+                agreement = not response["uncertain"] and readings_agree([*values, response["text"]])
             if agreement:
                 region["original_text"] = values[0]
                 region["ocr_decision"] = "independent_transcriptions_agree"
@@ -455,7 +471,7 @@ class Pipeline:
 
     def context(self, force=False):
         pages = [self.store.required(p, "reconcile") for p in self.page_ids()]
-        inputs = {"artifacts": {str(self.store.path(p["page_id"], "reconcile")): file_hash(self.store.path(p["page_id"], "reconcile")) for p in pages}}
+        inputs = {"artifacts": {str(self.store.path(p["page_id"], "reconcile")): self.store.hash(self.store.path(p["page_id"], "reconcile")) for p in pages}}
         fingerprint = self.store.fingerprint("context", inputs)
         path = self.store.root / "context.json"
         if self.store.cached(path, fingerprint, force):
@@ -477,15 +493,8 @@ class Pipeline:
         self.store.save(path, {"context": context, "chunks": chunks}, fingerprint, "context", inputs)
 
     def read_context(self):
-        path = self.store.root / "context.json"
-        value = self.store.required_path(path)
-        inputs = value.get("_meta", {}).get("inputs")
-        if self.store.cached(path, self.store.fingerprint("context", inputs)) is None:
-            raise ValueError("Chapter context is stale; rerun context")
-        for dep, expected in inputs.get("artifacts", {}).items():
-            if not Path(dep).is_file() or file_hash(Path(dep)) != expected:
-                raise ValueError("OCR changed; rerun chapter context")
-        return value["context"]
+        # Verifies the context and, transitively, the OCR of every page it was built from.
+        return self.store.required_path(self.store.root / "context.json")["context"]
 
     def stage_translate(self, page):
         image = Image.open(page["source_path"]).convert("RGB")
@@ -548,7 +557,7 @@ class Pipeline:
         return page
 
     def stage_qa(self, page):
-        from .rendering import render_page
+        from .rendering import FONT_SIZE_MAX, FONT_SIZE_MIN, render_page
         cfg = self.cfg.get("qa", {})
         page["visual_qa"] = {"status": "not_checked", "attempts": []}
         if not cfg.get("visual_enabled", True):
@@ -572,12 +581,18 @@ class Pipeline:
             if attempt >= self.cfg.get("retries", {}).get("layout_retries", 1):
                 break
             categories = {issue["category"] for issue in verdict["issues"]}
-            if not categories.intersection({"mask", "layout"}):
-                break
+            adjusted = copy.deepcopy(render_cfg)
             if "mask" in categories:
-                render_cfg["mask_dilation"] = min(3, render_cfg.get("mask_dilation", 1) + 1)
+                # Grow the erasure by one pixel up to 3, but never shrink a configured dilation.
+                dilation = int(render_cfg.get("mask_dilation", 1))
+                adjusted["mask_dilation"] = max(dilation, min(3, dilation + 1))
             if "layout" in categories:
-                render_cfg["font_size_max"] = max(render_cfg.get("font_size_min", 14), int(render_cfg.get("font_size_max", 40) * 0.85))
+                minimum = int(render_cfg.get("font_size_min", FONT_SIZE_MIN))
+                maximum = int(render_cfg.get("font_size_max", FONT_SIZE_MAX))
+                adjusted["font_size_max"] = min(maximum, max(minimum, int(maximum * 0.85)))
+            if adjusted == render_cfg:
+                break  # Nothing left to adjust; an identical re-render would prove nothing.
+            render_cfg = adjusted
             # Re-run cleaning AND typesetting from original for either feedback class.
             page["render"] = render_page(page, self.store.root / "rendered" / "qa" / f"attempt-{attempt + 1:02}", render_cfg)
         return page

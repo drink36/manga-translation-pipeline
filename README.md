@@ -69,6 +69,7 @@ uv pip install -p .venv -e '.[test]'
 
 1. Put naturally numbered PNG/JPEG/WebP pages in `input/`, or change `input` to an
    image/CBZ/ZIP path. A folder is read at its top level, in natural filename order.
+   Hidden files and macOS metadata (`__MACOSX/`, `._*`) are skipped.
 2. Edit `configs/pipeline.yaml`: input/output, language, reading direction, model
    choices, font, and retry budgets. Paths are relative to the YAML file.
 3. Use `source_language: ja` or `en` when known. `auto` and `mixed` route all crops
@@ -155,7 +156,9 @@ requested stages. Layout/OCR models are released between stages.
 
 Each artifact records configuration, source/code hashes, input dependencies, and
 referenced file hashes. Stale prerequisites fail with a rerun instruction instead
-of silently mixing outputs. Outputs are scoped by chapter/page and are never
+of silently mixing outputs. VLM connection settings (`endpoint`, `api_key_env`,
+`timeout_seconds`, `request_retries`) are excluded, so raising a timeout keeps
+cached model results. Outputs are scoped by chapter/page and are never
 written over input pages. Do not run two writers against the same output folder.
 
 ```text

@@ -4,9 +4,9 @@ import zipfile
 
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
-from manga_pipeline.rendering import export_cbz, render_page
+from manga_pipeline.rendering import _morph, export_cbz, render_page
 
 
 def make_page(tmp_path, background="white"):
@@ -159,6 +159,27 @@ def test_translation_cannot_overwrite_source(tmp_path):
     with pytest.raises(ValueError, match="overwrite the source"):
         render_page(page, tmp_path, config())
     assert source.read_bytes() == before
+
+
+def _full_page_morph(mask, radius, dilate):
+    operation = ImageFilter.MaxFilter if dilate else ImageFilter.MinFilter
+    return np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).filter(operation(2 * radius + 1))) > 127
+
+
+@pytest.mark.parametrize("dilate", [True, False])
+@pytest.mark.parametrize("radius", [1, 3, 8])
+def test_local_morphology_matches_full_page_filter(radius, dilate):
+    rng = np.random.default_rng(radius)
+    masks = [np.zeros((60, 50), dtype=bool), np.ones((60, 50), dtype=bool),
+             np.pad(np.ones((5, 5), dtype=bool), ((0, 55), (0, 45))),   # top-left corner
+             np.pad(np.ones((5, 5), dtype=bool), ((55, 0), (45, 0)))]   # bottom-right corner
+    for _ in range(25):
+        mask = np.zeros((60, 50), dtype=bool)
+        top, left = rng.integers(0, 60), rng.integers(0, 50)
+        mask[top:top + rng.integers(1, 30), left:left + rng.integers(1, 30)] = True
+        masks.append(mask & (rng.random(mask.shape) > 0.3))  # Ragged, glyph-like; may touch borders.
+    for mask in masks:
+        assert np.array_equal(_morph(mask, radius, dilate), _full_page_morph(mask, radius, dilate))
 
 
 def test_traditional_chinese_font_can_render_when_available(tmp_path):
