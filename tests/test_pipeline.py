@@ -6,9 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 import zipfile
 
+import numpy as np
 import pytest
 import yaml
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from manga_pipeline.config import load_config
 from manga_pipeline.demo import DemoVLM, create_demo
@@ -182,6 +183,37 @@ def test_audit_does_not_discard_material_extension_of_detected_text(subject):
     assert (any(r["bbox"][2] >= 120 for r in result["regions"])
             or result["coverage"]["status"] == "needs_review"
             or any(r["status"] == "needs_review" for r in result["regions"]))
+
+
+def test_detector_confirmation_merges_every_matching_mask(subject):
+    pipeline, page = subject
+    region = page["regions"][0]
+    region["uncertainty"] = ["vlm_only_region_requires_confirmation"]
+
+    class TwoMaskDetector:
+        """Confirms the crop twice, with the glyphs split between two masks."""
+
+        def detect(self, image_path, mask_dir):
+            mask_dir = Path(mask_dir)
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            with Image.open(image_path) as crop:
+                size = crop.size
+            results = []
+            for index, (left, right) in enumerate([(10, 30), (30, 50)]):
+                mask = Image.new("L", size)
+                ImageDraw.Draw(mask).rectangle((left, 10, right - 1, 40), fill=255)
+                mask.save(mask_dir / f"{index}.png")
+                results.append({"kind": "text", "bbox": [0, 0, *size], "mask_path": str(mask_dir / f"{index}.png")})
+            return results
+
+    pipeline._detector = TwoMaskDetector()
+    pipeline.store.path("p0001", "audit").parent.mkdir(parents=True)
+    pipeline._confirm_proposals(page, Image.open(page["source_path"]).convert("RGB"))
+    assert region["status"] == "auto_passed"
+    with Image.open(region["mask_path"]) as merged:
+        columns = np.flatnonzero((np.asarray(merged) > 127).any(axis=0))
+    # The padded crop starts at the page origin, so crop and page columns coincide.
+    assert (columns.min(), columns.max()) == (10, 49)
 
 
 def test_bubble_text_is_grouped_even_when_coverage_audit_is_disabled(subject):

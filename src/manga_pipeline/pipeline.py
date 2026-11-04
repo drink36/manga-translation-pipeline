@@ -308,7 +308,7 @@ class Pipeline:
             path = directory / f"{region['region_id']}.png"
             image.crop(box).save(path)
             candidates = self.detector.detect(path, directory / region["region_id"])
-            global_mask = Image.new("L", image.size)
+            global_mask = np.zeros((image.height, image.width), dtype=bool)
             found = False
             for candidate in candidates:
                 if candidate["kind"] != region["kind"]:
@@ -319,14 +319,15 @@ class Pipeline:
                     continue
                 found = True
                 if candidate.get("mask_path"):
-                    mask = Image.open(candidate["mask_path"]).convert("L")
-                    global_mask.paste(mask, box[:2])
+                    with Image.open(candidate["mask_path"]) as mask:
+                        # Union: a later candidate must not erase an earlier candidate's glyphs.
+                        global_mask[box[1]:box[3], box[0]:box[2]] |= np.asarray(mask.convert("L")) > 127
             if found:
                 region["uncertainty"].remove("vlm_only_region_requires_confirmation")
                 region["status"] = "needs_review" if region["uncertainty"] else "auto_passed"
-                if global_mask.getbbox():
+                if global_mask.any():
                     mask_path = directory / f"{region['region_id']}.full_mask.png"
-                    global_mask.save(mask_path)
+                    Image.fromarray(global_mask.astype("uint8") * 255).save(mask_path)
                     region["mask_path"] = str(mask_path)
 
     def _group_bubble_text(self, page):
