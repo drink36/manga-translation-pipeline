@@ -76,17 +76,29 @@ def _read_mask(path: str, size: tuple[int, int]) -> np.ndarray:
 def _morph(mask: np.ndarray, radius: int, dilate: bool = True) -> np.ndarray:
     if radius <= 0:
         return mask.copy()
+    result = np.zeros(mask.shape, dtype=bool)
+    rows, columns = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
+    if not len(rows):
+        return result
+    # Only pixels within `radius` of the mask can change, so filter just that window
+    # instead of the whole page. Rank filters replicate edge pixels; one extra pixel of
+    # margin keeps the window border empty, so the result equals a full-page filter.
+    margin = radius + 1
+    top, bottom = max(0, rows[0] - margin), min(mask.shape[0], rows[-1] + 1 + margin)
+    left, right = max(0, columns[0] - margin), min(mask.shape[1], columns[-1] + 1 + margin)
     operation = ImageFilter.MaxFilter if dilate else ImageFilter.MinFilter
-    return np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).filter(
-        operation(2 * radius + 1))) > 127
+    window = Image.fromarray(mask[top:bottom, left:right].astype(np.uint8) * 255)
+    result[top:bottom, left:right] = np.asarray(window.filter(operation(2 * radius + 1))) > 127
+    return result
 
 
 def _infer_white_glyph_mask(rgb: np.ndarray, region_mask: np.ndarray) -> np.ndarray:
     """A last-resort threshold mask, allowed only on a mostly white text crop."""
-    pixels = rgb[region_mask]
-    if not len(pixels) or np.mean(np.min(pixels, axis=1) >= 235) < 0.60:
+    darkest = np.min(rgb[region_mask], axis=1)  # Darkest channel of each pixel in the region.
+    if not len(darkest) or np.mean(darkest >= 235) < 0.60:
         raise ValueError("No glyph mask and the text crop is not mostly near-white.")
-    mask = region_mask & (np.min(rgb, axis=2) < 210)
+    mask = np.zeros_like(region_mask)
+    mask[region_mask] = darkest < 210
     if not mask.any():
         raise ValueError("No original glyphs could be isolated in the white text crop.")
     return mask
