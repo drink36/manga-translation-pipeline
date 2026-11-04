@@ -61,7 +61,9 @@ processor uses torchvision. Paddle VL uses native Transformers,
 repairs legacy processor metadata and preserves untied token embeddings as
 described in the project's
 [reference inference implementation](https://github.com/boomerkuigi/paddleocr-vl-1.6-manga-sft/blob/main/manga_sft/inference.py).
-It rejects missing/unexpected checkpoint keys and truncated generation.
+It rejects missing/unexpected checkpoint keys and truncated generation. Generation
+always enables the KV cache: the public manga checkpoint sets `use_cache: false`,
+which made CPU reads 8-22x slower with identical text.
 MangaOCR's published revision has a PyTorch `.bin` checkpoint; use modern
 PyTorch's restricted loading path, and do not bypass Transformers' version checks.
 

@@ -1,4 +1,5 @@
 """Offline adapter contract tests: synthetic images and fake model modules only."""
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -83,6 +84,40 @@ def test_koharu_strict_loader_geometry_and_class_thresholds(tmp_path, monkeypatc
         with Image.open(region["mask_path"]) as mask:
             assert mask.size == (100, 200)
             assert mask.getextrema() == (255, 255)
+
+
+def test_paddle_vl_generation_keeps_the_kv_cache_on(monkeypatch):
+    # The pinned manga checkpoint sets use_cache: false; generating without it is far slower.
+    class Tensor(np.ndarray):
+        def to(self, device):
+            return self
+
+    captured = {}
+
+    class FakeModel:
+        device = "cpu"
+        generation_config = SimpleNamespace(eos_token_id=2)
+
+        def generate(self, **kwargs):
+            captured.update(kwargs)
+            return np.array([[5, 6, 7, 8, 2]]).view(Tensor)
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+            return "prompt"
+
+        def __call__(self, text, images, return_tensors):
+            return {"input_ids": np.array([[5, 6]]).view(Tensor)}
+
+        def batch_decode(self, generated, skip_special_tokens):
+            return [" 待って！ "]
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(inference_mode=contextlib.nullcontext))
+    reader = object.__new__(adapters.PaddleVLReader)
+    reader.model, reader.processor, reader.max_new_tokens = FakeModel(), FakeProcessor(), 512
+    assert reader.read(Image.new("RGB", (40, 80), "white")) == "待って！"
+    assert captured["use_cache"] is True
+    assert captured["do_sample"] is False
 
 
 def test_detector_command_receives_literal_paths_and_persistent_masks(tmp_path):
