@@ -156,7 +156,9 @@ requested stages. Layout/OCR models are released between stages.
 
 Each artifact records configuration, source/code hashes, input dependencies, and
 referenced file hashes. Stale prerequisites fail with a rerun instruction instead
-of silently mixing outputs. Outputs are scoped by chapter/page and are never
+of silently mixing outputs. VLM connection settings (`endpoint`, `api_key_env`,
+`timeout_seconds`, `request_retries`) are excluded, so raising a timeout keeps
+cached model results. Outputs are scoped by chapter/page and are never
 written over input pages. Do not run two writers against the same output folder.
 
 ```text

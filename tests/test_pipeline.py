@@ -426,6 +426,26 @@ def test_new_run_rechecks_prerequisites_edited_since_the_previous_run(tmp_path):
         pipeline.run("translate")
 
 
+def test_vlm_connection_settings_do_not_invalidate_model_work(tmp_path):
+    config_path = create_demo(tmp_path / "demo")
+    Pipeline(load_config(config_path)).run()
+    cfg = _edit_demo_config(config_path, lambda value: value["vlm"].update(
+        endpoint="http://127.0.0.1:9000/v1", timeout_seconds=900, request_retries=3, api_key_env="LOCAL_KEY"))
+    with patch.object(DemoVLM, "ask", side_effect=AssertionError("Connection settings must reuse model work")):
+        Pipeline(cfg).run()
+    cfg = _edit_demo_config(config_path, lambda value: value["vlm"].update(temperature=0.7))
+    calls = []
+    original_ask = DemoVLM.ask
+
+    def recording_ask(self, task, payload, images=None):
+        calls.append(task)
+        return original_ask(self, task, payload, images)
+
+    with patch.object(DemoVLM, "ask", recording_ask):
+        Pipeline(cfg).run()
+    assert "coverage" in calls  # A sampling setting can change answers, so model work reruns.
+
+
 def test_demo_translation_override_reuses_ocr_reconcile_and_context(tmp_path):
     config_path = create_demo(tmp_path / "demo")
     cfg = load_config(config_path)

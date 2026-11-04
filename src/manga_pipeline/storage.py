@@ -24,6 +24,14 @@ def code_hashes() -> dict[str, str]:
     return {p.name: file_hash(p) for p in sorted(Path(__file__).parent.glob("*.py"))}
 
 
+# VLM client settings that change how a request is delivered, not what the model answers.
+TRANSPORT_KEYS = frozenset({"endpoint", "api_key_env", "timeout_seconds", "request_retries"})
+
+
+def _without_transport(section: dict) -> dict:
+    return {key: value for key, value in section.items() if key not in TRANSPORT_KEYS}
+
+
 def _signature(path: Path) -> tuple[int, ...]:
     # Changes whenever a file is replaced or rewritten.
     stat = Path(path).stat()
@@ -83,6 +91,11 @@ class Store:
             "translate": ["vlm"], "render": ["render"], "qa": ["qa", "render", "vlm"], "export": ["export"],
         }.get(stage, [])
         cfg = {k: self.config.get(k) for k in ["mode", "input", "output", *keys]}
+        # Raising a timeout or moving the server must not discard hours of cached model work.
+        if isinstance(cfg.get("vlm"), dict):
+            cfg["vlm"] = _without_transport(cfg["vlm"])
+        if isinstance(cfg.get("audit"), dict) and isinstance(cfg["audit"].get("mangalmm"), dict):
+            cfg["audit"] = {**cfg["audit"], "mangalmm": _without_transport(cfg["audit"]["mangalmm"])}
         if stage == "ocr":
             cfg["render"] = {"sfx_policy": self.config.get("render", {}).get("sfx_policy", "preserve")}
         retry_key = {"audit": "region_retries", "reconcile": "ocr_retries", "translate": "translation_retries", "qa": "layout_retries"}.get(stage)
