@@ -12,7 +12,7 @@ from PIL import Image
 
 from manga_pipeline.config import load_config
 from manga_pipeline.demo import DemoVLM, create_demo
-from manga_pipeline.geometry import normalize
+from manga_pipeline.geometry import associate, normalize
 from manga_pipeline.pipeline import Pipeline
 from manga_pipeline.storage import file_hash
 
@@ -182,6 +182,25 @@ def test_audit_does_not_discard_material_extension_of_detected_text(subject):
     assert (any(r["bbox"][2] >= 120 for r in result["regions"])
             or result["coverage"]["status"] == "needs_review"
             or any(r["status"] == "needs_review" for r in result["regions"]))
+
+
+def test_bubble_text_is_grouped_even_when_coverage_audit_is_disabled(subject):
+    pipeline, page = subject
+    pipeline.cfg["audit"]["enabled"] = False
+    bubble = pipeline._region({"bbox": [10, 10, 150, 110], "kind": "bubble"}, page, 2)
+    second = pipeline._region({"bbox": [80, 20, 130, 70], "kind": "text"}, page, 3)
+    page["layouts"] = [bubble]
+    page["regions"] = associate([page["regions"][0], second], [bubble], "rtl")
+
+    def respond(task, payload):
+        raise AssertionError("A disabled audit must not call the VLM")
+
+    pipeline._vlm = ScriptedVLM(respond)
+    result = pipeline.stage_audit(page)
+    assert len(result["regions"]) == 1
+    members = {member["region_id"] for member in result["regions"][0]["member_regions"]}
+    assert members == {"p0001_r0001", "p0001_r0003"}
+    assert "coverage_not_checked" in result["issues"]
 
 
 def test_qa_rerender_does_not_mutate_render_stage_artifact(subject):

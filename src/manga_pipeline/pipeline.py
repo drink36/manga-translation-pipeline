@@ -240,6 +240,8 @@ class Pipeline:
         if not cfg.get("enabled", True):
             page["coverage"] = {"status": "not_checked"}
             page["issues"].append("coverage_not_checked")
+            # Grouping is geometric; it must not depend on the VLM coverage scan.
+            self._group_bubble_text(page)
             return page
         image = Image.open(page["source_path"]).convert("RGB")
         scan_payload = {"page_id": page["page_id"], "known_regions": [], "attempt": 0}
