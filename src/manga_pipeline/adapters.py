@@ -405,13 +405,145 @@ class CommandDetector:
         pass
 
 
+def group_text_lines(lines: list[dict], bubble_of) -> list[list[dict]]:
+    """Group OCR lines into text blocks: one block per bubble; outside bubbles, by proximity.
+
+    ``lines`` carry a ``box`` [x1, y1, x2, y2]; ``bubble_of(line)`` returns a bubble index or None.
+    """
+    parent = list(range(len(lines)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    bubbles = [bubble_of(line) for line in lines]
+    for i, a in enumerate(lines):
+        for j in range(i + 1, len(lines)):
+            b = lines[j]
+            if bubbles[i] is not None or bubbles[j] is not None:
+                close = bubbles[i] == bubbles[j]
+            else:
+                height = min(a["box"][3] - a["box"][1], b["box"][3] - b["box"][1])
+                vertical_gap = max(a["box"][1], b["box"][1]) - min(a["box"][3], b["box"][3])
+                horizontal_gap = max(a["box"][0], b["box"][0]) - min(a["box"][2], b["box"][2])
+                close = vertical_gap <= 0.9 * height and horizontal_gap <= height
+            if close:
+                parent[find(i)] = find(j)
+    groups: dict[int, list[dict]] = {}
+    for i, line in enumerate(lines):
+        groups.setdefault(find(i), []).append(line)
+    return sorted(groups.values(), key=lambda group: min(line["box"][1] for line in group))
+
+
+class TextLineDetector:
+    """Text from OCR text lines; bubbles, panels and SFX from Koharu.
+
+    Koharu is trained on Japanese manga and outlines Latin lettering only partly. PaddleOCR's
+    recognized lines locate it precisely; lines are grouped per Koharu bubble, or by proximity.
+    """
+
+    def __init__(self, cfg: dict):
+        text = dict(cfg.get("text", {}))
+        self.min_score = float(text.get("min_score", 0.5))
+        self.layout = KoharuDetector(cfg)
+        self.reader = PaddleOCRReader({"backend": "paddle_ocr", "language": text.get("language", "en"),
+                                       "device": text.get("device", "cpu"), "options": text.get("options", {})})
+
+    @property
+    def metadata(self) -> dict:
+        return {"backend": "text_lines", "layout": self.layout.metadata, "text": self.reader.metadata}
+
+    def detect(self, image_path: Path, mask_dir: Path) -> list[dict]:
+        import numpy as np
+        from PIL import Image, ImageDraw
+        mask_dir = Path(mask_dir).resolve()
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        layout = [d for d in self.layout.detect(image_path, mask_dir) if d["kind"] != "text"]
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+
+        def read_lines(crop_box):
+            crop = np.asarray(image.crop(crop_box))[:, :, ::-1].copy()  # PaddleOCR expects BGR
+            found = []
+            for result in self.reader.model.predict(crop):
+                for polygon, text, score in zip(result["rec_polys"], result["rec_texts"], result["rec_scores"]):
+                    if float(score) < self.min_score or not re.search(r"\w", str(text)):
+                        continue
+                    points = [(float(x) + crop_box[0], float(y) + crop_box[1]) for x, y in polygon]
+                    xs, ys = [p[0] for p in points], [p[1] for p in points]
+                    found.append({"points": points, "box": [min(xs), min(ys), max(xs), max(ys)], "text": str(text), "score": float(score)})
+            return found
+
+        def center(box):
+            return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+        def inside(box, point):
+            return box[0] <= point[0] < box[2] and box[1] <= point[1] < box[3]
+        bubbles = []
+        for detection in layout:
+            if detection["kind"] == "bubble":
+                mask = None
+                if detection.get("mask_path"):
+                    with Image.open(detection["mask_path"]) as source:
+                        mask = np.asarray(source.convert("L")) > 127
+                bubbles.append((detection["bbox"], mask))
+
+        def bubble_of(line):
+            return bubble_at(center(line["box"]))
+
+        def bubble_at(point):
+            x, y = point
+            hits = [i for i, (box, mask) in enumerate(bubbles)
+                    if inside(box, (x, y)) and (mask is None or mask[min(int(y), mask.shape[0] - 1), min(int(x), mask.shape[1] - 1)])]
+            return min(hits, key=lambda i: (bubbles[i][0][2] - bubbles[i][0][0]) * (bubbles[i][0][3] - bubbles[i][0][1])) if hits else None
+
+        # The whole page gives text outside bubbles. Each bubble is also read on its own:
+        # widely spaced hand lettering ("T H A T") is missed by the whole-page pass.
+        page_lines = read_lines((0, 0, image.width, image.height))
+        lines = [line for line in page_lines if bubble_of(line) is None]
+        for index, (box, _mask) in enumerate(bubbles):
+            crop_box = (max(0, int(box[0]) - 16), max(0, int(box[1]) - 16),
+                        min(image.width, int(box[2]) + 16), min(image.height, int(box[3]) + 16))
+            own = [line for line in read_lines(crop_box) if bubble_of(line) == index]
+            lines.extend(own or [line for line in page_lines if bubble_of(line) == index])
+        # Lettering inside an SFX detection stays SFX (preserved by default), except inside a
+        # speech bubble: Koharu labels bold English dialogue ("KIMIYA!?") as SFX.
+        layout = [d for d in layout if not (d["kind"] == "sfx" and bubble_at(center(d["bbox"])) is not None)]
+        sfx = [d["bbox"] for d in layout if d["kind"] == "sfx"]
+        lines = [line for line in lines
+                 if bubble_of(line) is not None or not any(inside(box, center(line["box"])) for box in sfx)]
+
+        result = list(layout)
+        for number, group in enumerate(group_text_lines(lines, bubble_of)):
+            canvas = Image.new("L", image.size)
+            draw = ImageDraw.Draw(canvas)
+            for line in group:
+                draw.polygon(line["points"], fill=255)
+            path = mask_dir / f"text_lines_{number:04d}.png"
+            canvas.save(path)
+            box = [max(0.0, min(line["box"][0] for line in group)), max(0.0, min(line["box"][1] for line in group)),
+                   min(float(image.width), max(line["box"][2] for line in group)), min(float(image.height), max(line["box"][3] for line in group))]
+            result.append({"kind": "text", "bbox": box, "polygon": _rectangle(box), "mask_path": str(path),
+                           "score": sum(line["score"] for line in group) / len(group),
+                           "detector_text": "\n".join(line["text"] for line in group)})
+        return result
+
+    def close(self) -> None:
+        self.layout.close()
+        self.reader.close()
+
+
 def build_detector(cfg: dict):
     backend = cfg.get("backend", "koharu")
     if backend == "koharu":
         return KoharuDetector(cfg)
     if backend == "command":
         return CommandDetector(cfg)
-    raise AdapterError(f"Unknown detector backend {backend!r}; expected koharu or command.")
+    if backend == "text_lines":
+        return TextLineDetector(cfg)
+    raise AdapterError(f"Unknown detector backend {backend!r}; expected koharu, text_lines or command.")
 
 
 def build_reader(cfg: dict):

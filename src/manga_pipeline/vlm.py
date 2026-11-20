@@ -104,8 +104,14 @@ def _request_schema(task: str, payload: dict[str, Any]) -> dict[str, Any]:
     elif task == "visual_qa":
         properties["issues"]["items"]["properties"]["region_id"] = {"enum": [*ids, "page"]}
     else:
+        # One slot per input region, in input order, with its ID fixed. An enum per item let
+        # Qwen repeat one ID and drop another; grammars cannot enforce uniqueItems. llama.cpp
+        # rejects "items": false, so maxItems bounds the array instead.
         array = properties["translations" if task == "translate" else "checks"]
-        array["items"]["properties"]["region_id"] = {"enum": ids}
+        item = array.pop("items")
+        array["prefixItems"] = [copy.deepcopy(item) for _ in ids]
+        for slot, region_id in zip(array["prefixItems"], ids):
+            slot["properties"]["region_id"] = {"const": region_id}
         array.update({"minItems": len(ids), "maxItems": len(ids)})
     return schema
 

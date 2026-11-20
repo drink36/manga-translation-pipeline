@@ -336,3 +336,12 @@ def test_demo_render_config_change_reuses_all_model_work_except_visual_qa(tmp_pa
     assert calls == ["visual_qa", "visual_qa"]
     chapter = json.loads((output / "export" / "chapter.json").read_text())
     assert chapter["status"] == "auto_passed"
+
+
+def test_loose_vlm_box_around_found_text_is_not_new_text(subject):
+    pipeline, page = subject
+    loose = [{"bbox": [100, 100, 500, 700], "kind": "text"}]  # 16..80 x 12..84 px around region 20..70
+    assert len(pipeline._add_proposals(copy.deepcopy(page), loose, (160, 120))) == 1
+    pipeline.cfg["audit"]["contained_overlap"] = 0.5
+    assert pipeline._add_proposals(page, loose, (160, 120)) == []
+    assert len(pipeline._add_proposals(page, [{"bbox": [600, 600, 900, 900], "kind": "text"}], (160, 120))) == 1

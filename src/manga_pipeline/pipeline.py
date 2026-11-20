@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import re
+import sys
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -85,6 +86,9 @@ class Pipeline:
                 obj.close()
         self._detector = None
         self._readers = {}
+        rendering = sys.modules.get(f"{__package__}.rendering")
+        if rendering is not None:
+            rendering.release_models()
 
     def run(self, stage="all", force=False):
         stages = STAGES if stage == "all" else (stage,)
@@ -248,6 +252,11 @@ class Pipeline:
             # not hide a large new text proposal. Keep one-to-many matches.
             coverage = covered_fraction(box, [region["bbox"] for region in page["regions"]])
             if coverage >= self.cfg.get("audit", {}).get("match_overlap", 0.6):
+                continue
+            # Optional: a loose VLM box around text a detector already outlined is that text.
+            contained = self.cfg.get("audit", {}).get("contained_overlap")
+            if contained and any(intersection(box, region["bbox"]) >= contained * max(1, area(region["bbox"]))
+                                 for region in page["regions"] if region["kind"] == "text"):
                 continue
             region = self._region({"bbox": box, "kind": proposal.get("kind", "text"), "score": None, "detected_by": source}, page, next_number)
             flag(region, "vlm_only_region_requires_confirmation")

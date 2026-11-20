@@ -13,11 +13,13 @@ server:
   model_path: ../models/qwen3.5-9b/Qwen3.5-9B-Q4_K_M.gguf
   mmproj_path: ../models/qwen3.5-9b/mmproj-F16.gguf
   # Requests served at once; the pipeline runs that many pages concurrently in the
-  # audit/reconcile/translate/qa stages. Measured on the 5070: 30-40% faster than 1,
-  # ~8.3 GB for Qwen. Use 2 (~7.2 GB) when other apps hold more than ~2 GB of GPU memory.
-  max_num_seqs: 4
-  # host, port and max_model_len (context per slot) come from pipeline.yaml;
-  # its vLLM-only keys are ignored.
+  # audit/reconcile/translate/qa stages. Measured on the 5070 vs 1 slot: 2 slots
+  # 20-27% faster (~7.2 GB for Qwen at 16K), 4 slots 30-40% (~8.3 GB). 2 leaves room
+  # for PaddleOCR on the GPU next to the desktop.
+  max_num_seqs: 2
+  # Context per slot. Largest request seen: 10.3K tokens (visual QA, two page images).
+  max_model_len: 12288
+  # host and port come from pipeline.yaml; its vLLM-only keys are ignored.
 
 ocr:
   readers:

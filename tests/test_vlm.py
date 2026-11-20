@@ -66,8 +66,12 @@ class VLMTests(unittest.TestCase):
         payload = {"regions": [{"region_id": "a"}, {"region_id": "b"}]}
         order = _request_schema("reading_order", payload)["properties"]["region_ids"]
         self.assertEqual((order["items"], order["minItems"], order["maxItems"]), ({"enum": ["a", "b"]}, 2, 2))
-        translations = _request_schema("translate", payload)["properties"]["translations"]
-        self.assertEqual(translations["items"]["properties"]["region_id"], {"enum": ["a", "b"]})
+        for task, key in (("translate", "translations"), ("verify", "checks")):
+            array = _request_schema(task, payload)["properties"][key]
+            self.assertNotIn("items", array)
+            self.assertEqual([slot["properties"]["region_id"] for slot in array["prefixItems"]], [{"const": "a"}, {"const": "b"}])
+            self.assertEqual((array["minItems"], array["maxItems"]), (2, 2))
+        self.assertIn("items", TASK_SCHEMAS["translate"]["properties"]["translations"])
         self.assertNotIn("enum", str(TASK_SCHEMAS["reading_order"]))
 
     def test_retries_malformed_output_then_succeeds(self):

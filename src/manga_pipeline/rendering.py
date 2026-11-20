@@ -7,10 +7,12 @@ and appears in the report. Every render starts from the source image.
 from __future__ import annotations
 
 import difflib
+import gc
 import hashlib
 import json
 import math
 import re
+import sys
 import threading
 import zipfile
 from functools import lru_cache
@@ -211,9 +213,9 @@ _LINE_CACHE: dict = {}
 
 
 @lru_cache(maxsize=2)
-def _line_detector(language: str, options_json: str):
+def _line_detector(language: str, device: str, options_json: str):
     from paddleocr import PaddleOCR
-    return PaddleOCR(lang=language, device="cpu", use_doc_orientation_classify=False, use_doc_unwarping=False,
+    return PaddleOCR(lang=language, device=device, use_doc_orientation_classify=False, use_doc_unwarping=False,
                      use_textline_orientation=False, **json.loads(options_json))
 
 
@@ -234,7 +236,9 @@ def _text_line_mask(original: Image.Image, box: tuple[int, int, int, int], bubbl
         right, bottom = max(right, int(columns.max()) + 1), max(bottom, int(rows.max()) + 1)
     crop_box = (max(0, left), max(0, top), min(original.width, right), min(original.height, bottom))
     crop = np.asarray(original.crop(crop_box))[:, :, ::-1].copy()  # PaddleOCR expects BGR
-    settings = (str(options.get("language", "en")), json.dumps(options.get("options", {}), sort_keys=True))
+    device = str(options.get("device", "cpu"))
+    settings = (str(options.get("language", "en")), "gpu" + device[4:] if device.startswith("cuda") else device,
+                json.dumps(options.get("options", {}), sort_keys=True))
     # QA re-renders the same page; reuse detections of identical source pixels.
     key = (settings, crop_box, hashlib.sha256(crop.tobytes()).hexdigest())
     with _MODEL_LOCK:
@@ -271,6 +275,20 @@ def _line_matches(line: str, source: str, threshold: float) -> bool:
         return False
     match = difflib.SequenceMatcher(None, line, source, autojunk=False).find_longest_match(0, len(line), 0, len(source))
     return match.size >= threshold * len(line)
+
+
+def release_models() -> None:
+    """Free the text-line and LaMa models and their GPU memory; cached detections stay."""
+    with _MODEL_LOCK:
+        _line_detector.cache_clear()
+        _load_lama.cache_clear()
+    gc.collect()
+    paddle = sys.modules.get("paddle")
+    if paddle is not None and paddle.is_compiled_with_cuda():
+        paddle.device.cuda.empty_cache()
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_initialized():
+        torch.cuda.empty_cache()
 
 
 def _loose_text(text: str) -> str:
@@ -410,7 +428,8 @@ def render_page(page: dict, output_dir: Path, cfg: dict) -> dict:
             bubble = (_read_mask(region["bubble_mask_path"], original.size)
                       if region.get("bubble_mask_path") else None)
             lines = None
-            if cfg.get("text_lines"):
+            # skip_masked: regions that already carry a text-line mask from detection keep it.
+            if cfg.get("text_lines") and not (cfg["text_lines"].get("skip_masked") and region.get("mask_path")):
                 try:
                     lines = _text_line_mask(original, text_box, bubble, cfg["text_lines"], region.get("original_text", ""))
                 except Exception as error:
