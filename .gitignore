@@ -10,5 +10,6 @@ output/*
 models/
 bin/
 logs/
+manga-*.log
 *.cbz
 review/overrides.json

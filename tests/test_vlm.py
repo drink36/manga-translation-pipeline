@@ -160,6 +160,25 @@ class VLMTests(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=response(value)):
             self.assertEqual(self.client().ask("context", payload), value)
 
+    def test_context_keeps_evidence_of_a_carried_over_term(self):
+        # Seen on a real chapter: a confirmed term that the new pages do not mention came
+        # back with no evidence on both attempts, which aborted the run.
+        previous = {"summary": "", "characters": [], "glossary": [
+            {"source": "MATSUZAWA-SAN", "target": "松澤小姐", "status": "confirmed",
+             "evidence": ["p0031_r0015", "p0031_r0017"]}]}
+        payload = {"pages": [{"regions": [{"region_id": "p0034_r0001", "original_text": "HELLO"}]}],
+                   "previous_context": previous}
+        value = {"summary": "They talk.", "characters": [], "glossary": [
+            {"source": "MATSUZAWA-SAN", "target": "松澤小姐", "status": "confirmed", "evidence": []}]}
+        with patch("urllib.request.urlopen", return_value=response(value)):
+            result = self.client().ask("context", payload)
+        self.assertEqual(result["glossary"][0]["evidence"], ["p0031_r0015", "p0031_r0017"])
+        # A new confirmed term without evidence is still rejected.
+        value["glossary"].append({"source": "TAKEDA", "target": "武田", "status": "confirmed", "evidence": []})
+        with patch("urllib.request.urlopen", return_value=response(value)), \
+             self.assertRaisesRegex(VLMError, "need source evidence"):
+            self.client().ask("context", payload)
+
     def test_image_transport_preserves_ratio_and_original(self):
         try:
             from PIL import Image

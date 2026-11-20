@@ -1,0 +1,71 @@
+# English pages on Ascend. English settings follow configs/windows-en.yaml. Everything
+# runs on the A100 beside Qwen: Koharu layout on CUDA torch, PaddleOCR on paddlepaddle-gpu.
+# paddlepaddle-gpu 3.3.1 pins older NVIDIA libraries than torch 2.14.1+cu130, so it is
+# installed with --no-deps and uses torch's copies. To fall back, set the three `gpu` to `cpu`.
+extends: ascend.yaml
+output: ../output/chapter-en
+source_language: en
+reading_direction: rtl   # English-translated manga; use ltr for Western comics
+
+server:
+  # Requests Qwen serves at once; the pipeline runs that many pages in parallel in the
+  # audit/reconcile/translate/qa stages. Measured on the A100: audit ~11 s per page with
+  # 1 slot, ~3 s with 4 (Qwen's cache 4-10% used, nothing queued). 8 is not measured yet.
+  # Not part of the result fingerprint, so changing it keeps finished pages.
+  max_num_seqs: 8
+  # Tokens the server handles per step. The work is prompt-heavy (measured ~980 prompt
+  # tokens/s against ~110 generated at 4 slots), so 4096 may cap 8 slots. Not measured yet.
+  max_num_batched_tokens: 8192
+
+context:
+  # The one Qwen stage that runs a single request at a time. 3 pages per chunk meant 33
+  # requests (about 4.5 min) on a 98-page chapter; 10 is not measured yet.
+  pages_per_chunk: 10
+
+ocr:
+  readers:
+    paddle_english:
+      device: gpu
+      # PaddlePaddle 3.3's oneDNN CPU path crashes on PP-OCRv5 (see windows.yaml).
+      options: {enable_mkldnn: false}
+
+audit:
+  # Re-detecting each Qwen-proposed box ran the full detector serially and rarely
+  # confirmed anything: the text-line detector already outlines the text.
+  detector_retry: false
+  # A Qwen box that holds at least half of an already-found text region is that text.
+  contained_overlap: 0.5
+
+review:
+  # PaddleOCR writes ALL CAPS and Qwen often doesn't, so most arbitrations are case or
+  # punctuation only. Unresolved disagreements are still flagged.
+  flag_arbitrated_ocr: false
+
+detector:
+  # Koharu (Japanese-trained) outlines Latin lettering only partly. Text comes from
+  # PaddleOCR's recognized lines, grouped per bubble; Koharu still finds bubbles,
+  # panels and SFX (its model settings are inherited from pipeline.yaml).
+  backend: text_lines
+  device: cuda             # Koharu layout (torch)
+  text:
+    language: en
+    device: gpu            # PaddleOCR text lines
+    options: {enable_mkldnn: false, cpu_threads: 8}
+    min_score: 0.5
+
+render:
+  # Typeset flagged translations anyway; they stay listed in review.csv.
+  render_uncertain: true
+  # Erase and place text by PaddleOCR's recognized text lines. No lines found = untouched.
+  text_lines:
+    language: en
+    device: gpu
+    options: {enable_mkldnn: false, cpu_threads: 8}
+    skip_masked: true      # detector regions already carry text-line masks
+  inpaint:
+    backend: auto          # plain white fill where possible, otherwise LaMa
+    # IOPaint's manga LaMa, MD5 29f284f36a0a510bcacf39ecf4c4d54f. If the file is missing,
+    # regions that need it keep their original lettering.
+    torchscript_path: ../models/lama/anime-manga-big-lama.pt
+    device: cuda
+    signature: image_mask

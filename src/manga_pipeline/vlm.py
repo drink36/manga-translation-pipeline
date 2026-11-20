@@ -169,10 +169,13 @@ def _validate_result(task: str, result: dict[str, Any], payload: dict[str, Any])
 
         collect_ids(payload.get("pages", []))
         previous = payload.get("previous_context", {})
+        carried = {}
         if isinstance(previous, dict):
             for item in previous.get("glossary", []):
                 if isinstance(item, dict):
-                    evidence_ids.update(i for i in item.get("evidence", []) if isinstance(i, str))
+                    kept = [i for i in item.get("evidence", []) if isinstance(i, str)]
+                    evidence_ids.update(kept)
+                    carried[item.get("source")] = kept
         for item in result["glossary"]:
             _require(item, dict, "glossary entry")
             for key in ("source", "target"):
@@ -182,6 +185,10 @@ def _validate_result(task: str, result: dict[str, Any], payload: dict[str, Any])
             if item.get("status") not in {"tentative", "confirmed"}:
                 raise VLMResponseError("Glossary status must be tentative or confirmed")
             _require(item.get("evidence"), list, "glossary.evidence")
+            if not item["evidence"] and item["source"] in carried:
+                # A term kept from previous_context whose pages are no longer in view keeps
+                # the evidence it was accepted with; the model tends to return it empty.
+                item["evidence"] = list(carried[item["source"]])
             for region_id in item["evidence"]:
                 _require(region_id, str, "glossary evidence region_id")
                 if region_id not in evidence_ids:

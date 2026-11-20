@@ -13,7 +13,8 @@
 # Explicit submission only. Script-first invocation works with the user's wrapper.
 # MANGA_STAGE=all sbatch scripts/ascend.sh --account=YOUR_PROJECT
 set -euo pipefail
-MANGA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Slurm runs a copy of this script from its spool dir, so under sbatch the repo is the submit dir.
+MANGA_ROOT="${SLURM_SUBMIT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$MANGA_ROOT"
 MANGA_CONFIG="${MANGA_CONFIG:-configs/ascend.yaml}"
 MANGA_STAGE="${MANGA_STAGE:-all}"

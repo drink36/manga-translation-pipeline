@@ -524,3 +524,30 @@ def test_loose_vlm_box_around_found_text_is_not_new_text(subject):
     pipeline.cfg["audit"]["contained_overlap"] = 0.5
     assert pipeline._add_proposals(page, loose, (160, 120)) == []
     assert len(pipeline._add_proposals(page, [{"bbox": [600, 600, 900, 900], "kind": "text"}], (160, 120))) == 1
+
+
+def test_context_accumulates_the_glossary_across_chunks(tmp_path):
+    # Seen on a real 98-page chapter: each chunk's reply replaced the context, so only the
+    # last chunk's two terms reached translate and names changed rendering mid-chapter.
+    config_path = create_demo(tmp_path / "demo")
+    Pipeline(load_config(config_path)).run()
+    cfg = _edit_demo_config(config_path, lambda value: value.setdefault("context", {}).update(pages_per_chunk=1))
+    pipeline = Pipeline(cfg)
+    replies = iter([
+        {"summary": "first", "characters": [{"name": "Takeda", "description": "a senior"}],
+         "glossary": [{"source": "TAKEDA", "target": "武田", "status": "confirmed", "evidence": ["p0001_r0001"]}]},
+        {"summary": "second", "characters": [],
+         "glossary": [{"source": "takeda", "target": "竹田", "status": "tentative", "evidence": ["p0002_r0001"]},
+                      {"source": "YUKITO", "target": "由紀人", "status": "tentative", "evidence": []}]},
+    ])
+    pipeline._vlm = ScriptedVLM(lambda *_: next(replies))
+    pipeline.context(force=True)
+    context = pipeline.read_context()
+    assert context["summary"] == "second"
+    # A known name keeps its first rendering; new names are added.
+    assert [(g["source"], g["target"], g["status"]) for g in context["glossary"]] == [
+        ("TAKEDA", "武田", "confirmed"), ("YUKITO", "由紀人", "tentative")]
+    assert context["glossary"][0]["evidence"] == ["p0001_r0001", "p0002_r0001"]
+    assert [c["name"] for c in context["characters"]] == ["Takeda"]
+    # The second chunk is shown what the first one found.
+    assert pipeline._vlm.calls[1][1]["previous_context"]["glossary"][0]["source"] == "TAKEDA"

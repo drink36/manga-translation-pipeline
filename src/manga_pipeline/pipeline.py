@@ -52,6 +52,26 @@ def readings_agree(readings: list[str]) -> bool:
     return len(readings) >= 2 and all(r.strip() for r in readings) and len({normalized_text(r) for r in readings}) == 1
 
 
+def _merge_context(running: dict, reply: dict) -> dict:
+    """Add one chunk's reply to the chapter context; a reply only covers the pages in view."""
+    def key(text) -> str:
+        return " ".join(str(text).split()).casefold()
+
+    glossary = {key(item["source"]): item for item in running["glossary"]}
+    for item in reply["glossary"]:
+        known = glossary.get(key(item["source"]))
+        if known is None:
+            glossary[key(item["source"])] = item
+            continue
+        # The first accepted target stays, so a name keeps one rendering for the chapter.
+        known["evidence"] = list(dict.fromkeys([*known["evidence"], *item["evidence"]]))[:5]
+        if item["status"] == "confirmed":
+            known["status"] = "confirmed"
+    characters = {key(item["name"]): item for item in running["characters"]}
+    characters.update({key(item["name"]): item for item in reply["characters"]})
+    return {"summary": reply["summary"], "glossary": list(glossary.values()), "characters": list(characters.values())}
+
+
 class Pipeline:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -524,9 +544,10 @@ class Pipeline:
         chunks = []
         for start in range(0, len(pages), size):
             chunk = [{"page_id": p["page_id"], "regions": [{"region_id": r["region_id"], "original_text": r["original_text"], "uncertainty": r["uncertainty"]} for r in p["regions"] if r.get("status") != "preserved"]} for p in pages[start:start + size]]
-            context = self.vlm.ask("context", {"pages": chunk, "previous_context": context})
+            reply = self.vlm.ask("context", {"pages": chunk, "previous_context": context})
             # Bound future prompts; full chunk outputs remain in the artifact.
-            chunks.append(copy.deepcopy(context))
+            chunks.append(copy.deepcopy(reply))
+            context = _merge_context(context, reply)
             context["summary"] = context["summary"][:self.cfg.get("context", {}).get("max_summary_chars", 4000)]
             context["glossary"] = context["glossary"][:self.cfg.get("context", {}).get("max_glossary_entries", 100)]
             context["characters"] = context["characters"][:self.cfg.get("context", {}).get("max_characters", 40)]

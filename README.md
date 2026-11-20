@@ -7,7 +7,7 @@ takes it with `--config`:
 
 | Machine | Config | Qwen server | How to run |
 |---|---|---|---|
-| OSC Ascend, A100 40 GB (Linux) | `configs/ascend.yaml` | vLLM, `Qwen3.8-27B` (4-bit AWQ) | Slurm or two terminals: [Run on Ascend](#run-on-ascend) |
+| OSC Ascend, A100 40 GB (Linux) | `configs/ascend.yaml` (Japanese), `configs/ascend-en.yaml` (English) | vLLM, `Qwen3.8-27B` (4-bit AWQ) | Slurm or two terminals: [Run on Ascend](#run-on-ascend) |
 | RTX 5070 12 GB (Windows) | `configs/windows.yaml` (Japanese), `configs/windows-en.yaml` (English) | llama.cpp, `Qwen3.5-9B` (4-bit GGUF) | Two terminals: [Run on Windows](#run-on-windows-rtx-5070) |
 
 `configs/pipeline.yaml` is the shared base that both extend. It holds everything that
@@ -17,23 +17,52 @@ and in a machine config when only that machine should.
 
 This folder contains executable orchestration and model adapters, not downloaded
 weights. The CPU demo and automated tests run without model inference. One English
-chapter has been run end to end on the RTX 5070. The A100 setup has not been run
-since the Windows changes were merged. OCR and translation quality, memory peaks,
-and speed have not been measured on your manga.
+chapter has been run end to end on the RTX 5070. On the A100, a 98-page English
+chapter has run through `reconcile` with `configs/ascend-en.yaml`; `context` and the
+later stages have not completed there yet. OCR and translation quality and memory
+peaks have not been measured on your manga.
 
-## What is included
+## How the pipeline works
 
-| Role | Default |
-|---|---|
-| Layout | KoharuLayout: text/SFX/bubbles/panels and masks |
-| Coverage | Independent Qwen page scan, optional overlapping tiles and detector retries |
-| Japanese OCR | PaddleOCR-VL manga checkpoint and MangaOCR, both blind |
-| English/mixed OCR | Regular English PaddleOCR / multilingual PaddleOCR-VL |
-| OCR arbitration | Qwen blind reread, then reconciliation with alternatives |
-| Context/translation | Chunked chapter context, page-level zh-TW translation |
-| Verification | Strict region-ID checks, Qwen review, bounded targeted retries |
-| Rendering | Glyph masks, conservative plain fill or local LaMa, horizontal CJK fitting |
-| QA/export | Deterministic rendering checks plus VLM inspection; PNG, CBZ, JSON, review CSV |
+A chapter goes through ten stages, in this order. Each stage saves its result per page
+under `output/`, so a run that stops can be started again with the same command and
+continues from the pages already done ([Stages and resume](#stages-and-resume)).
+
+| # | Stage | What it does | Model |
+|---|---|---|---|
+| 1 | `prepare` | Reads the pages and saves each as a full-size, correctly oriented PNG | none |
+| 2 | `detect` | Finds text, sound effects, bubbles and panels, with masks | KoharuLayout; the English configs take text from PaddleOCR text lines |
+| 3 | `audit` | Scans each page independently for text the detector missed, with one retry on overlapping tiles | Qwen |
+| 4 | `ocr` | Reads every text crop | Japanese: PaddleOCR-VL manga and MangaOCR. English: PaddleOCR. Mixed or unknown: PaddleOCR-VL 1.6 |
+| 5 | `reconcile` | Where the readers disagree, or there is only one, Qwen reads the crop without seeing their text and then settles the reading. It also sets the reading order | Qwen |
+| 6 | `context` | Builds a chapter summary, glossary and character list, a few pages at a time | Qwen |
+| 7 | `translate` | Translates each page to Traditional Chinese, checks every region, and retries the regions that fail | Qwen |
+| 8 | `render` | Erases the original lettering (white fill, or LaMa over artwork) and fits the Chinese text | LaMa, optional |
+| 9 | `qa` | Checks the layout by rule, then has Qwen compare the original and the rendered page | Qwen |
+| 10 | `export` | Writes PNG, CBZ, the full JSON and a review CSV | none |
+
+Whatever the models cannot settle is flagged for review and left untouched on the page,
+never guessed ([Review and correct](#review-and-correct)).
+
+Qwen always runs on the GPU, behind a local server that stays loaded for the whole run.
+The other models run where the config puts them:
+
+| Config | Qwen | Layout (Koharu) | OCR | LaMa |
+|---|---|---|---|---|
+| `ascend.yaml` | `Qwen3.8-27B`, 4-bit, vLLM | CPU | CPU | not set up |
+| `ascend-en.yaml` | same | GPU | GPU | GPU |
+| `windows.yaml` | `Qwen3.5-9B`, 4-bit, llama.cpp | CPU | CPU | not set up |
+| `windows-en.yaml` | same | CPU | GPU | CPU |
+
+- `audit`, `reconcile`, `translate` and `qa` work on `server.max_num_seqs` pages at the
+  same time. `context` cannot: each chunk builds on the one before it.
+- LaMa needs its weights file at the path named in the config. Without it, lettering
+  that sits on artwork keeps its original text.
+- Design details and the saved-file format are in [docs/pipeline.md](docs/pipeline.md),
+  the model adapters in [docs/models.md](docs/models.md), and rendering in
+  [docs/rendering.md](docs/rendering.md).
+
+### Model choices
 
 **Checkpoint distinction:** public access to the previously discussed
 `AlphaBeta07/PaddleOCR-VL-1.6-For-Manga` returned HTTP 401 during setup. The default
