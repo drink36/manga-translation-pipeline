@@ -2,15 +2,24 @@
 
 Japanese/English manga → Traditional Chinese, with independent OCR readings,
 coverage checks, chapter context, bounded verification loops, and editable JSON.
-Configured for one **NVIDIA RTX 5070 (12 GB)** running `Qwen3.5-9B`: through llama.cpp
-on Windows ([Run on Windows](#run-on-windows-rtx-5070)), or through vLLM on Linux/WSL.
-The original target was an A100 40 GB on OSC Ascend with `Qwen3.8-27B`; the Slurm
-launcher for that setup is kept in `scripts/ascend.sh`.
+The same code runs on two machines. Each has its own config file, and every command
+takes it with `--config`:
+
+| Machine | Config | Qwen server | How to run |
+|---|---|---|---|
+| OSC Ascend, A100 40 GB (Linux) | `configs/ascend.yaml` | vLLM, `Qwen3.8-27B` (4-bit AWQ) | Slurm or two terminals: [Run on Ascend](#run-on-ascend) |
+| RTX 5070 12 GB (Windows) | `configs/windows.yaml` (Japanese), `configs/windows-en.yaml` (English) | llama.cpp, `Qwen3.5-9B` (4-bit GGUF) | Two terminals: [Run on Windows](#run-on-windows-rtx-5070) |
+
+`configs/pipeline.yaml` is the shared base that both extend. It holds everything that
+is the same on both machines (stages, OCR readers, sampling, retries, rendering) and
+is not run on its own. Put a setting in the base when both machines should get it,
+and in a machine config when only that machine should.
 
 This folder contains executable orchestration and model adapters, not downloaded
-weights. The CPU demo and automated tests run without model inference. Actual OCR,
-translation quality, GPU compatibility, memory peaks, and speed have not been
-validated on your manga or on an RTX 5070.
+weights. The CPU demo and automated tests run without model inference. One English
+chapter has been run end to end on the RTX 5070. The A100 setup has not been run
+since the Windows changes were merged. OCR and translation quality, memory peaks,
+and speed have not been measured on your manga.
 
 ## What is included
 
@@ -73,20 +82,25 @@ uv pip install -p .venv -e '.[test]'
 1. Put naturally numbered PNG/JPEG/WebP pages in `input/`, or change `input` to an
    image/CBZ/ZIP path. A folder is read at its top level, in natural filename order.
    Hidden files and macOS metadata (`__MACOSX/`, `._*`) are skipped.
-2. Edit `configs/pipeline.yaml`: input/output, language, reading direction, model
-   choices, font, and retry budgets. Paths are relative to the YAML file.
+2. Edit your machine's config (`configs/ascend.yaml` or `configs/windows.yaml`) for
+   the Qwen model, server and font. Edit `configs/pipeline.yaml` for settings both
+   machines share: input/output, language, reading direction, OCR readers, and retry
+   budgets. A machine config can override any of them. Paths are relative to the
+   YAML file.
 3. Use `source_language: ja` or `en` when known. `auto` and `mixed` route all crops
    through the configured multilingual reader; there is no automatic per-region
    language classifier in this version.
 4. Keep `render_uncertain: false` to preserve original pixels for unresolved text.
 
 ```bash
-.venv/bin/python -m manga_pipeline plan --config configs/pipeline.yaml
-.venv/bin/python -m manga_pipeline doctor --config configs/pipeline.yaml
-.venv/bin/python -m manga_pipeline serve --config configs/pipeline.yaml --print-command
+.venv/bin/python -m manga_pipeline plan --config configs/ascend.yaml
+.venv/bin/python -m manga_pipeline doctor --config configs/ascend.yaml
+.venv/bin/python -m manga_pipeline serve --config configs/ascend.yaml --print-command
 ```
 
 These three inspection commands do not load/download models or contact a server.
+`--config` is required; on Windows use `.venv\Scripts\python` and
+`configs/windows.yaml`.
 
 ## Run on Windows (RTX 5070)
 
@@ -158,7 +172,7 @@ PaddleOCR's oneDNN CPU acceleration, which crashes in PaddlePaddle 3.3.
 
 ## Install model environments when ready
 
-For Linux or WSL with vLLM; on Windows, follow the previous section instead.
+For the A100 (Linux) with vLLM; on Windows, follow the previous section instead.
 Use Python 3.11 or 3.12 for the model environments. Keep the serving engine
 separate from the local OCR dependencies. The existing CPU test `.venv` does not
 contain the model packages. These commands install packages, not an evaluated
@@ -178,15 +192,15 @@ the CPU checks. Record resolved versions with `uv pip freeze -p <env>` for a rea
 
 ## Run on Ascend
 
-The default model configuration uses CPU for layout/OCR and one GPU for Qwen.
-This allows the Qwen server to remain loaded across audit, reconciliation,
-translation, and QA. **40 GB is device memory; `--mem=64G` is host RAM.** The
-default config now targets a 12 GB RTX 5070; on an A100 you can switch `vlm.model`
-back to a larger Qwen checkpoint.
+`configs/ascend.yaml` serves `Qwen3.8-27B` (4-bit AWQ) through vLLM on one A100 and
+uses the CPU for layout/OCR. This allows the Qwen server to remain loaded across
+audit, reconciliation, translation, and QA. **40 GB is device memory; `--mem=64G`
+is host RAM.**
 
-The launcher requests Ascend's `nextgen` partition, one GPU, and starts/stops its
-own Qwen server. It uses your script-first sbatch convention and environment stage
-selection. Replace `YOUR_PROJECT` with your Slurm allocation:
+The launcher uses `configs/ascend.yaml` unless `MANGA_CONFIG` is set. It requests
+Ascend's `nextgen` partition, one GPU, and starts/stops its own Qwen server. It uses
+your script-first sbatch convention and environment stage selection. Replace
+`YOUR_PROJECT` with your Slurm allocation:
 
 ```bash
 cd /users/PAS2119/drink36/manga-translation-pipeline
@@ -199,6 +213,9 @@ For a different configuration:
 MANGA_STAGE=all MANGA_CONFIG=configs/quality.yaml \
   sbatch scripts/ascend.sh --account=YOUR_PROJECT
 ```
+
+`quality.yaml` and the two `paddle-vl16-*.yaml` variants extend `ascend.yaml`. To use
+one on Windows, change its `extends:` line to `windows.yaml`.
 
 **No job has been submitted.** The script never submits additional jobs. Account,
 environment installations, model availability, and server startup must be ready
@@ -215,10 +232,10 @@ An explicit run inside an allocated compute node can also use two terminals:
 
 ```bash
 # Terminal 1: starts model serving and may download uncached weights.
-.venv-vllm/bin/python -m manga_pipeline serve --config configs/pipeline.yaml
+.venv-vllm/bin/python -m manga_pipeline serve --config configs/ascend.yaml
 
 # Terminal 2: runs the chapter; may download missing detector/OCR weights.
-.venv-models/bin/python -m manga_pipeline run --config configs/pipeline.yaml --stage all
+.venv-models/bin/python -m manga_pipeline run --config configs/ascend.yaml --stage all
 ```
 
 ## Stages and resume
@@ -282,10 +299,11 @@ context and translation because their meaning may change. See
 
 ## What still needs real validation
 
-- Model loading and inference on the RTX 5070, with llama.cpp on Windows or vLLM on
-  Linux/WSL (Blackwell needs a CUDA 12.8+ build). Neither server has been started here.
-- GPU memory with 16K context and two images per request. vLLM's ~9.1 GB checkpoint
-  needs other GPU apps closed. If either server runs out of memory, lower
+- The A100 setup after the merge with the Windows changes: vLLM loading
+  `Qwen3.8-27B`, and vLLM accepting the fixed-order (`prefixItems`) JSON schema used
+  for translate and verify replies. That schema has only been checked on llama.cpp.
+  The shared sampling settings (temperature 0.7) are also new for the A100.
+- Peak GPU memory on either machine. If a server runs out of memory, lower
   `server.max_model_len` or `vlm.image_max_pixels`.
 - Missed-text recall, OCR character errors, translation accuracy, and pages/minute.
 - MangaLMM's extra benefit. Its endpoint must emit the documented JSON contracts;

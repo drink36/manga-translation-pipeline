@@ -1,5 +1,5 @@
 # Public official 1.6 base, not manga-fine-tuned. Keeps independent MangaOCR.
-extends: pipeline.yaml
+extends: ascend.yaml
 output: ../output/chapter-vl16-base
 ocr:
   readers:

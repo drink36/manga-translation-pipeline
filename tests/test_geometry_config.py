@@ -3,9 +3,11 @@ from pathlib import Path
 import pytest
 
 from manga_pipeline import storage
-from manga_pipeline.cli import server_command
+from manga_pipeline.cli import main, server_command
 from manga_pipeline.config import load_config
 from manga_pipeline.geometry import covered_fraction, denormalize, normalize
+
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
 def test_duplicate_boxes_do_not_overstate_coverage():
@@ -49,6 +51,23 @@ def test_server_backends(tmp_path):
         (tmp_path / "bad.yaml").write_text(f"extends: base.yaml\nserver: {server}\n")
         with pytest.raises(ValueError, match="server.backend"):
             load_config(tmp_path / "bad.yaml")
+
+
+def test_every_machine_config_names_a_model_and_a_server():
+    # pipeline.yaml is the shared base; each machine config must complete it.
+    machines = sorted(p for p in CONFIGS.glob("*.yaml") if p.name != "pipeline.yaml")
+    assert {"ascend.yaml", "windows.yaml", "windows-en.yaml"} <= {p.name for p in machines}
+    for path in machines:
+        cfg = load_config(path)
+        assert cfg["vlm"]["model"] and cfg["render"]["font_path"], path.name
+        assert cfg["vlm"]["model"] in server_command(cfg), path.name
+    assert load_config(CONFIGS / "ascend.yaml")["server"]["backend"] == "vllm"
+    assert load_config(CONFIGS / "windows.yaml")["server"]["backend"] == "llama.cpp"
+
+
+def test_shared_base_is_rejected_with_a_pointer_to_machine_configs(capsys):
+    assert main(["plan", "--config", str(CONFIGS / "pipeline.yaml")]) == 1
+    assert "configs/ascend.yaml" in capsys.readouterr().err
 
 
 def test_renderer_code_change_keeps_translation_fingerprint(tmp_path, monkeypatch):

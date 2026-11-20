@@ -1,5 +1,5 @@
 # Full independent Qwen crop OCR plus unconditional coverage tiles.
-extends: pipeline.yaml
+extends: ascend.yaml
 output: ../output/chapter-quality
 audit:
   always_tile: true

@@ -73,7 +73,7 @@ MangaOCR's published revision has a PyTorch `.bin` checkpoint; use modern
 PyTorch's restricted loading path, and do not bypass Transformers' version checks.
 
 Local adapters default to `device: cpu`. This permits Qwen to occupy the single
-12 GB RTX 5070 (formerly a 40 GB A100) while local adapters run on the CPU, at a potentially substantial
+GPU (the A100 or the RTX 5070) while local adapters run on the CPU, at a potentially substantial
 speed cost. In GPU stage scheduling, explicitly select `device: cuda` only after
 releasing the Qwen server's GPU memory. Calling `close()` releases the local
 adapter, but does not stop an independently running Qwen process. For Paddle VL,

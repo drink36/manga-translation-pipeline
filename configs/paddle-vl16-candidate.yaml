@@ -1,7 +1,7 @@
 # Requested manga-specific 1.6 candidate. Public access returned HTTP 401 during
 # setup. Use only after verifying your access and checkpoint provenance.
 # No automatic fallback is performed if access fails.
-extends: pipeline.yaml
+extends: ascend.yaml
 output: ../output/chapter-vl16-candidate
 ocr:
   readers:

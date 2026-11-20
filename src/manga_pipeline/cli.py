@@ -36,7 +36,7 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("plan", "doctor", "run", "serve"):
         p = commands.add_parser(name)
-        p.add_argument("--config", default="configs/pipeline.yaml")
+        p.add_argument("--config", required=True, help="Machine config, e.g. configs/ascend.yaml or configs/windows.yaml")
         if name == "run":
             p.add_argument("--stage", choices=("all", *STAGES), default="all")
             p.add_argument("--force", action="store_true", help="Recompute requested stage, preserving original input files")
@@ -54,6 +54,9 @@ def main(argv=None):
             print("Synthetic demo only: no OCR/translation model was run.")
             return 0
         cfg = load_config(args.config)
+        if not cfg.get("vlm", {}).get("model"):
+            raise ValueError(f"{args.config} sets no vlm.model. configs/pipeline.yaml is the shared base; "
+                             "use a machine config such as configs/ascend.yaml or configs/windows.yaml.")
         if args.command == "plan":
             print(json.dumps({"input": cfg["input"], "output": cfg["output"], "mode": cfg.get("mode", "real"), "stages": list(STAGES), "detector": cfg.get("detector"), "ocr_routes": cfg.get("ocr", {}).get("routes"), "ocr_readers": cfg.get("ocr", {}).get("readers"), "vlm": cfg.get("vlm"), "audit": cfg.get("audit"), "retries": cfg.get("retries"), "server_command": shlex.join(server_command(cfg))}, indent=2, ensure_ascii=False))
             return 0

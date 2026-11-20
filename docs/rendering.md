@@ -203,10 +203,10 @@ A source-text override acknowledges that source transcription and clears its
 existing text uncertainty. A translation override alone does not resolve
 uncertainty in the source. Reading-order checks can still raise a separate
 review requirement. Set `review.overrides_path` in `configs/pipeline.yaml`,
-then rerun from the project directory:
+then rerun from the project directory with your machine config:
 
 ```bash
-manga-pipeline run --config configs/pipeline.yaml --stage all
+manga-pipeline run --config configs/ascend.yaml --stage all
 ```
 
 Changing the overrides changes affected artifact provenance. A full resumable

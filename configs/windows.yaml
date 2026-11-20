@@ -19,7 +19,7 @@ server:
   max_num_seqs: 2
   # Context per slot. Largest request seen: 10.3K tokens (visual QA, two page images).
   max_model_len: 12288
-  # host and port come from pipeline.yaml; its vLLM-only keys are ignored.
+  # host and port come from pipeline.yaml.
 
 ocr:
   readers:

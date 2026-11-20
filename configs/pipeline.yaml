@@ -1,4 +1,6 @@
-# Default: public manga crop checkpoint + independent MangaOCR + Qwen.
+# Shared base for every machine: public manga crop checkpoint + independent MangaOCR + Qwen.
+# Not run directly. Each machine has a config that extends this file and adds its Qwen
+# model, server and font: configs/ascend.yaml (A100) or configs/windows.yaml (RTX 5070).
 # Paths below resolve relative to THIS file. Use Python 3.11/3.12 for model extras.
 mode: real
 input: ../input
@@ -70,8 +72,7 @@ ocr:
 
 vlm:
   endpoint: http://127.0.0.1:8000/v1
-  model: cyankiwi/Qwen3.5-9B-AWQ-4bit   # vLLM on Linux/WSL, ~9.1 GB; Windows: configs/windows.yaml
-  revision: 156edc4bbeb8d1910ee7be9196bafaf1bc052156
+  # model and revision come from the machine config.
   api_key_env: null
   timeout_seconds: 300
   max_tokens: 4096
@@ -87,15 +88,11 @@ vlm:
   enable_thinking: false
 
 server:
-  backend: vllm           # or llama.cpp: see configs/windows.yaml
+  # backend (vllm or llama.cpp) and its settings come from the machine config.
   host: 127.0.0.1
   port: 8000
-  tensor_parallel_size: 1
-  max_model_len: 16384
-  max_num_seqs: 1
-  max_num_batched_tokens: 4096
-  gpu_memory_utilization: 0.90   # 12 GB card: weights leave ~1.5 GB for cache/activations
-  dtype: bfloat16
+  max_model_len: 16384    # context per request slot
+  max_num_seqs: 1         # requests served at once
 
 retries:
   region_retries: 1
@@ -114,8 +111,7 @@ review:
   flag_arbitrated_ocr: true
 
 render:
-  font_path: /usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc
-  font_index: 3             # Traditional Chinese face in the installed Noto TTC
+  # font_path and font_index come from the machine config.
   font_size_min: 14
   font_size_max: 44
   padding: 8

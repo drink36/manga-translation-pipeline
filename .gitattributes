@@ -1,0 +1,2 @@
+# The Slurm launcher runs on Linux; Windows line endings would break it.
+*.sh text eol=lf

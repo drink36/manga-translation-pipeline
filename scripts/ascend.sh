@@ -15,7 +15,7 @@
 set -euo pipefail
 MANGA_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$MANGA_ROOT"
-MANGA_CONFIG="${MANGA_CONFIG:-configs/pipeline.yaml}"
+MANGA_CONFIG="${MANGA_CONFIG:-configs/ascend.yaml}"
 MANGA_STAGE="${MANGA_STAGE:-all}"
 MANGA_PYTHON="${MANGA_PYTHON:-$MANGA_ROOT/.venv-models/bin/python}"
 MANGA_SERVER_PYTHON="${MANGA_SERVER_PYTHON:-$MANGA_ROOT/.venv-vllm/bin/python}"

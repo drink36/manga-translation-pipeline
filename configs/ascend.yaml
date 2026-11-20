@@ -1,0 +1,20 @@
+# OSC Ascend, one A100 (40 GB): vLLM serves Qwen3.8-27B as a 4-bit AWQ checkpoint;
+# layout/OCR stay on CPU. Used by scripts/ascend.sh (Slurm) and by a manual two-terminal
+# run inside an allocation. Setup: README "Run on Ascend". Paths resolve relative to THIS file.
+extends: pipeline.yaml
+
+vlm:
+  model: cyankiwi/Qwen3.8-27B-AWQ-INT4
+  revision: 6e134bae811fb5adac50ee042ae5f029ac6779aa
+
+server:
+  backend: vllm
+  tensor_parallel_size: 1
+  max_num_batched_tokens: 4096
+  gpu_memory_utilization: 0.85   # 40 GB is device memory; starting value, not a measured optimum
+  dtype: bfloat16
+  # host, port, max_model_len (16K) and max_num_seqs (1) come from pipeline.yaml.
+
+render:
+  font_path: /usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc
+  font_index: 3             # Traditional Chinese face in the installed Noto TTC
