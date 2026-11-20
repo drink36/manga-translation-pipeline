@@ -1,0 +1,53 @@
+# English pages on Windows: PaddleOCR's English reader replaces the Japanese pair.
+# Needs the english extra once: uv pip install -p .venv -e ".[english]"
+extends: windows.yaml
+output: ../output/chapter-en
+source_language: en
+reading_direction: rtl   # English-translated manga; use ltr for Western comics
+
+ocr:
+  readers:
+    paddle_english:
+      device: gpu
+
+audit:
+  # Re-detecting each Qwen-proposed box ran the full detector serially (~28 of 34 min)
+  # and rarely confirmed anything: the text-line detector already outlines the text.
+  detector_retry: false
+  # A Qwen box that holds at least half of an already-found text region is that text,
+  # not new text (Qwen's boxes are loose; this removes most duplicate regions).
+  contained_overlap: 0.5
+
+review:
+  # PaddleOCR writes ALL CAPS and Qwen often doesn't, so most arbitrations are case or
+  # punctuation only. Unresolved disagreements are still flagged.
+  flag_arbitrated_ocr: false
+
+detector:
+  # Koharu (Japanese-trained) outlines Latin lettering only partly. Text comes from
+  # PaddleOCR's recognized lines, grouped per bubble; Koharu still finds bubbles,
+  # panels and SFX (its model settings are inherited from pipeline.yaml).
+  backend: text_lines
+  text:
+    language: en
+    device: gpu            # paddlepaddle-gpu (CUDA 12.9); use cpu with the CPU build
+    options: {enable_mkldnn: false, cpu_threads: 8}
+    min_score: 0.5
+
+render:
+  # Koharu misses much English lettering and the OCR pair rarely agrees verbatim, so
+  # nearly every bubble gets a review flag. Typeset flagged translations anyway; they
+  # stay listed in review.csv.
+  render_uncertain: true
+  # Erase and place text by PaddleOCR's recognized text lines: Koharu outlines English
+  # lettering only partly and Qwen's boxes can sit beside it. No lines found = untouched.
+  text_lines:
+    language: en
+    device: gpu
+    options: {enable_mkldnn: false, cpu_threads: 8}
+    skip_masked: true      # detector regions already carry text-line masks
+  inpaint:
+    backend: auto          # plain white fill where possible, otherwise LaMa
+    torchscript_path: ../models/lama/anime-manga-big-lama.pt   # IOPaint, MD5 29f284f36a0a510bcacf39ecf4c4d54f
+    device: cpu
+    signature: image_mask

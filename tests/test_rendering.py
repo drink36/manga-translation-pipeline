@@ -98,8 +98,35 @@ def test_overlap_is_reported_and_first_render_preserved(tmp_path):
     duplicate["region_id"] = "r2"
     page["regions"].append(duplicate)
     report = render_page(page, tmp_path / "two", config())
+    assert report["regions"][1]["status"] == "duplicate" and not report["issues"]
+    assert np.array_equal(image_array(first["output_path"]), image_array(report["output_path"]))
+    page["regions"][1].update(region_id="r3", bbox=[80, 45, 140, 71], original_text="Something else")
+    report = render_page(page, tmp_path / "three", config())
     assert report["issues"][0]["code"] == "region_overlap"
     assert np.array_equal(image_array(first["output_path"]), image_array(report["output_path"]))
+
+
+def test_preferred_source_wins_overlap(tmp_path):
+    page = make_page(tmp_path)
+    twin = copy.deepcopy(page["regions"][0])
+    twin.update(region_id="r2", detected_by="qwen", translation={"text": "Hi", "status": "auto_passed", "issues": []})
+    page["regions"].append(twin)
+    statuses = lambda report: {r["region_id"]: r["status"] for r in report["regions"]}
+    assert statuses(render_page(page, tmp_path / "order", config())) == {"r1": "auto_passed", "r2": "duplicate"}
+    assert statuses(render_page(page, tmp_path / "qwen", config(prefer_on_overlap="qwen"))) == {"r1": "duplicate", "r2": "auto_passed"}
+
+
+def test_dilation_past_bubble_edge_is_clipped_not_rejected(tmp_path):
+    page = make_page(tmp_path)
+    bubble = Image.new("L", (240, 140))
+    ImageDraw.Draw(bubble).rectangle((15, 15, 225, 125), fill=255)
+    ImageDraw.Draw(bubble).line((49, 15, 49, 125), fill=0)  # bubble edge touching the glyphs
+    bubble.save(tmp_path / "bubble.png")
+    page["regions"][0]["bubble_mask_path"] = str(tmp_path / "bubble.png")
+    report = render_page(page, tmp_path / "out", config())
+    assert report["status"] == "auto_passed", report
+    changed = np.any(image_array(report["output_path"]) != image_array(page["source_path"]), axis=2)
+    assert changed[50:66, 50:66].any() and not changed[:, 49].any()
 
 
 def test_bubble_mask_constrains_text_not_only_bounding_box(tmp_path):

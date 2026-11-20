@@ -118,4 +118,4 @@ The demo's replies are scripted and its artifacts are labelled `mode: demo`.
 The default same-node setup reserves the GPU for Qwen and uses host CPU for the
 other networks. Configure a separate staged GPU run only after budgeting memory.
 MangaLMM requires an independently provisioned endpoint; simply enabling it is
-not a mechanism to fit two VLM servers on one 40 GB GPU.
+not a mechanism to fit two VLM servers on one GPU, least of all a 12 GB one.

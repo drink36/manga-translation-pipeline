@@ -43,10 +43,19 @@ def load_config(path: str | Path, _seen=None) -> dict:
         cfg[key] = str((path.parent / cfg[key]).resolve())
     if Path(cfg["input"]) == Path(cfg["output"]) or Path(cfg["input"]) in Path(cfg["output"]).parents:
         raise ValueError("Output must be outside the input folder")
-    for section, key in (("review", "overrides_path"), ("render", "font_path")):
+    for section, key in (("review", "overrides_path"), ("render", "font_path"), ("server", "model_path"), ("server", "mmproj_path")):
         value = cfg.get(section, {}).get(key)
         if value:
             cfg[section][key] = str((path.parent / value).resolve())
+    server = cfg.get("server", {})
+    if server.get("backend", "vllm") not in ("vllm", "llama.cpp"):
+        raise ValueError("server.backend must be vllm or llama.cpp")
+    if server.get("backend") == "llama.cpp":
+        if not (server.get("model_path") and server.get("mmproj_path")):
+            raise ValueError("server.backend llama.cpp needs server.model_path and server.mmproj_path")
+        executable = server.get("executable", "llama-server")
+        if "/" in executable or "\\" in executable:  # a bare name is looked up on PATH
+            server["executable"] = str((path.parent / executable).resolve())
     inpaint = cfg.get("render", {}).get("inpaint", {})
     if isinstance(inpaint, str):
         inpaint = {"backend": inpaint}

@@ -70,24 +70,31 @@ ocr:
 
 vlm:
   endpoint: http://127.0.0.1:8000/v1
-  model: cyankiwi/Qwen3.8-27B-AWQ-INT4
-  revision: 6e134bae811fb5adac50ee042ae5f029ac6779aa
+  model: cyankiwi/Qwen3.5-9B-AWQ-4bit   # vLLM on Linux/WSL, ~9.1 GB; Windows: configs/windows.yaml
+  revision: 156edc4bbeb8d1910ee7be9196bafaf1bc052156
   api_key_env: null
   timeout_seconds: 300
   max_tokens: 4096
   image_max_pixels: 1600000
   request_retries: 1
-  temperature: 0.1
+  # Qwen's recommended non-thinking sampling for general tasks
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 1.5
+  repetition_penalty: 1.0
   enable_thinking: false
 
 server:
+  backend: vllm           # or llama.cpp: see configs/windows.yaml
   host: 127.0.0.1
   port: 8000
   tensor_parallel_size: 1
   max_model_len: 16384
   max_num_seqs: 1
   max_num_batched_tokens: 4096
-  gpu_memory_utilization: 0.85
+  gpu_memory_utilization: 0.90   # 12 GB card: weights leave ~1.5 GB for cache/activations
   dtype: bfloat16
 
 retries:

@@ -206,3 +206,39 @@ def test_external_failure_reports_exit_and_stderr():
     ]})
     with pytest.raises(adapters.AdapterError, match="exited 7: model unavailable"):
         reader.read(Image.new("RGB", (10, 10)))
+
+
+def test_text_lines_group_per_bubble_or_by_proximity():
+    def line(name, x1, y1, x2, y2):
+        return {"name": name, "box": [x1, y1, x2, y2]}
+    lines = [line("b1", 100, 100, 200, 120), line("b2", 100, 300, 180, 320),  # far apart, same bubble
+             line("n1", 500, 100, 600, 120), line("n2", 505, 125, 590, 145),  # stacked caption lines
+             line("far", 500, 600, 600, 620), line("edge", 205, 100, 260, 120)]  # beside bubble 0, outside it
+    bubble = {"b1": 0, "b2": 0}
+    groups = adapters.group_text_lines(lines, lambda item: bubble.get(item["name"]))
+    assert sorted(sorted(item["name"] for item in group) for group in groups) == [["b1", "b2"], ["edge"], ["far"], ["n1", "n2"]]
+
+
+def test_text_line_detector_keeps_bubble_dialogue_that_koharu_calls_sfx(tmp_path):
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (300, 200), "white").save(image_path)
+
+    class Layout:
+        def detect(self, path, mask_dir):
+            return [{"kind": "bubble", "bbox": [10, 10, 150, 150]},
+                    {"kind": "sfx", "bbox": [20, 20, 140, 60]},     # bold dialogue inside the bubble
+                    {"kind": "sfx", "bbox": [200, 20, 290, 60]}]    # real SFX on the art
+
+    class Model:
+        def predict(self, crop):
+            if crop.shape[:2] != (200, 300):  # per-bubble passes find nothing; page pass is used
+                return []
+            return [{"rec_polys": [[(30, 30), (130, 30), (130, 50), (30, 50)], [(210, 30), (280, 30), (280, 50), (210, 50)]],
+                     "rec_texts": ["KIMIYA!?", "DOKI"], "rec_scores": [0.99, 0.99]}]
+
+    detector = object.__new__(adapters.TextLineDetector)
+    detector.min_score, detector.layout = 0.5, Layout()
+    detector.reader = type("Reader", (), {"model": Model()})()
+    found = detector.detect(image_path, tmp_path / "masks")
+    assert [d["detector_text"] for d in found if d["kind"] == "text"] == ["KIMIYA!?"]
+    assert [d["bbox"] for d in found if d["kind"] == "sfx"] == [[200, 20, 290, 60]]

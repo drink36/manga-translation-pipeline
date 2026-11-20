@@ -10,6 +10,24 @@ from pathlib import Path
 from .config import digest
 
 
+ALL_MODULES = None
+_BASE = {"__init__.py", "config.py", "geometry.py", "pipeline.py", "storage.py"}
+_MODEL = {"adapters.py", "demo.py", "prompts.py", "vlm.py"}
+# Modules whose code can change a stage's artifact (pipeline.py holds every stage).
+STAGE_MODULES = {
+    "prepare": _BASE,
+    "detect": _BASE | {"adapters.py"},
+    "audit": _BASE | _MODEL,
+    "ocr": _BASE | _MODEL,
+    "reconcile": _BASE | _MODEL,
+    "context": _BASE | _MODEL,
+    "translate": _BASE | _MODEL,
+    "render": _BASE | {"rendering.py"},
+    "qa": _BASE | _MODEL | {"rendering.py"},
+    "export": _BASE | {"rendering.py"},
+}
+
+
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -83,7 +101,10 @@ class Store:
         return self.root / "pages" / page_id / f"{stage}.json"
 
     def fingerprint(self, stage: str, inputs) -> str:
-        # Include code in fingerprints so changed processing cannot reuse old artifacts.
+        # Include the code each stage runs, so changed processing cannot reuse old
+        # artifacts, while e.g. a renderer change leaves OCR and translation reusable.
+        names = STAGE_MODULES.get(stage, ALL_MODULES)
+        code = {name: value for name, value in code_hashes().items() if names is ALL_MODULES or name in names}
         keys = {
             "prepare": [], "detect": ["detector", "source_language", "reading_direction"],
             "audit": ["audit", "detector", "vlm", "reading_direction"], "ocr": ["ocr", "render"],
@@ -115,7 +136,7 @@ class Store:
             for edit in relevant.values():
                 paths.extend(str((Path(override).parent / edit[k]).resolve()) for k in ("mask_path", "bubble_mask_path") if edit.get(k))
             external = {p: self.hash(Path(p)) for p in paths if p and Path(p).is_file()}
-        return digest({"stage": stage, "config": cfg, "inputs": inputs, "overrides": override_hash, "external": external, "code": code_hashes()})
+        return digest({"stage": stage, "config": cfg, "inputs": inputs, "overrides": override_hash, "external": external, "code": code})
 
     def cached(self, path: Path, fingerprint: str, force=False):
         if force or not path.is_file():

@@ -6,7 +6,10 @@ import csv
 import io
 import json
 import re
+import sys
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 import numpy as np
@@ -15,6 +18,7 @@ from PIL import Image, ImageOps
 from .config import STAGES, digest
 from .geometry import area, associate, checked_box, covered_fraction, denormalize, intersection, normalize, overlap, padded, polygon
 from .storage import Store, natural_key, read_json, write_json
+from .vlm import VLMError
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PREVIOUS = {"detect": "prepare", "audit": "detect", "ocr": "audit", "reconcile": "ocr", "translate": "reconcile", "render": "translate", "qa": "render"}
@@ -31,6 +35,11 @@ def flag(region: dict, reason: str):
     if reason not in region.setdefault("uncertainty", []):
         region["uncertainty"].append(reason)
     region["status"] = "needs_review"
+
+
+# Page work in these stages is independent and mostly waits on the VLM server, so
+# pages run concurrently, up to the server's request slots (server.max_num_seqs).
+CONCURRENT_STAGES = ("audit", "reconcile", "translate", "qa")
 
 
 def normalized_text(text: str) -> str:
@@ -50,6 +59,7 @@ class Pipeline:
         self.demo = cfg.get("mode") == "demo"
         self._vlm = None
         self._detector = None
+        self._detector_lock = threading.Lock()
         self._readers = {}
         self.overrides = {}
         override_path = cfg.get("review", {}).get("overrides_path")
@@ -88,6 +98,9 @@ class Pipeline:
                 obj.close()
         self._detector = None
         self._readers = {}
+        rendering = sys.modules.get(f"{__package__}.rendering")
+        if rendering is not None:
+            rendering.release_models()
 
     def run(self, stage="all", force=False):
         stages = STAGES if stage == "all" else (stage,)
@@ -106,8 +119,7 @@ class Pipeline:
                 elif current == "export":
                     self.export()
                 else:
-                    for page_id in self.page_ids():
-                        self.page_stage(current, page_id, force)
+                    self.page_stages(current, force)
                 # Do not keep OCR/layout networks resident between stages.
                 self.close()
         finally:
@@ -174,6 +186,24 @@ class Pipeline:
             self.store.save(artifact, page, fingerprint, "prepare", inputs)
         write_json(self.store.root / "manifest.json", {"schema_version": 1, "input": self.cfg["input"], "page_ids": page_ids, "mode": "demo" if self.demo else "real"})
 
+    def page_stages(self, stage, force=False):
+        page_ids = self.page_ids()
+        workers = min(len(page_ids), int(self.cfg.get("server", {}).get("max_num_seqs", 1))) if stage in CONCURRENT_STAGES else 1
+        if workers <= 1:
+            for page_id in page_ids:
+                self.page_stage(stage, page_id, force)
+            return
+        self.vlm  # create the shared client before worker threads start
+        with ThreadPoolExecutor(workers) as pool:
+            futures = [pool.submit(self.page_stage, stage, page_id, force) for page_id in page_ids]
+            try:
+                for future in futures:
+                    future.result()
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+
     def page_stage(self, stage, page_id, force=False):
         previous = PREVIOUS[stage]
         page = copy.deepcopy(self.store.required(page_id, previous))
@@ -235,6 +265,11 @@ class Pipeline:
             # not hide a large new text proposal. Keep one-to-many matches.
             coverage = covered_fraction(box, [region["bbox"] for region in page["regions"]])
             if coverage >= self.cfg.get("audit", {}).get("match_overlap", 0.6):
+                continue
+            # Optional: a loose VLM box around text a detector already outlined is that text.
+            contained = self.cfg.get("audit", {}).get("contained_overlap")
+            if contained and any(intersection(box, region["bbox"]) >= contained * max(1, area(region["bbox"]))
+                                 for region in page["regions"] if region["kind"] == "text"):
                 continue
             region = self._region({"bbox": box, "kind": proposal.get("kind", "text"), "score": None, "detected_by": source}, page, next_number)
             flag(region, "vlm_only_region_requires_confirmation")
@@ -315,7 +350,8 @@ class Pipeline:
             box = padded(region["bbox"], *image.size, pixels=32)
             path = directory / f"{region['region_id']}.png"
             image.crop(box).save(path)
-            candidates = self.detector.detect(path, directory / region["region_id"])
+            with self._detector_lock:  # one local detector, shared by concurrent pages
+                candidates = self.detector.detect(path, directory / region["region_id"])
             global_mask = np.zeros((image.height, image.width), dtype=bool)
             found = False
             for candidate in candidates:
@@ -457,7 +493,11 @@ class Pipeline:
                 flag(region, "empty_transcription")
         active = [r for r in page["regions"] if r.get("status") != "preserved"]
         if active:
-            order = self.vlm.ask("reading_order", {"regions": [{"region_id": r["region_id"], "bbox": normalize(r["bbox"], *image.size), "original_text": r["original_text"], "bubble_id": r.get("bubble_id"), "panel_id": r.get("panel_id")} for r in active], "direction": self.cfg.get("reading_direction", "rtl")}, [image])
+            try:
+                order = self.vlm.ask("reading_order", {"regions": [{"region_id": r["region_id"], "bbox": normalize(r["bbox"], *image.size), "original_text": r["original_text"], "bubble_id": r.get("bubble_id"), "panel_id": r.get("panel_id")} for r in active], "direction": self.cfg.get("reading_direction", "rtl")}, [image])
+            except VLMError as error:
+                # Ordering is advisory: keep the geometric order and send the page to review.
+                order = {"region_ids": [r["region_id"] for r in active], "uncertain": True, "reason": f"Kept geometric order: {error}"}
             if sorted(order["region_ids"]) != sorted(r["region_id"] for r in active):
                 raise ValueError("Reading order must contain every region ID exactly once")
             for i, region_id in enumerate(order["region_ids"]):
